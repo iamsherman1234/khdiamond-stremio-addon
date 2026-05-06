@@ -1,0 +1,14 @@
+#!/bin/bash
+# Copy this file to cron_env.sh and fill in your values
+# Never commit cron_env.sh to git
+
+export GDRIVE_SERVICE_ACCOUNT='paste_your_service_account_json_here'
+export TMDB_ACCESS_TOKEN="your_tmdb_bearer_token"
+export MEDIAFLOW_URL="https://your-domain/mediaflow-py"
+export MEDIAFLOW_URL2="https://your-fallback-mediaflow.onrender.com"
+export MEDIAFLOW_PASSWORD="your_mediaflow_password"
+export CLOUDFLARE_API_TOKEN="your_cloudflare_api_token"
+export CF_ACCOUNT_ID="your_cloudflare_account_id"
+export CF_KV_NAMESPACE="your_kv_namespace_id"
+export ADDON_URL="https://your-domain/khdiamond"
+export COOKIES_PATH="/root/khdiamond/cookies.txt"

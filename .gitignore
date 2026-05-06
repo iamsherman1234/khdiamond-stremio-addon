@@ -1,0 +1,38 @@
+# Secrets
+cron_env.sh
+khdiamond.env
+service_account.json
+cookies.txt
+.env
+
+# Per-user data
+users/
+
+# Catalog (generated)
+catalog.json
+catalog.json.bak
+
+# Cache
+meta_cache.json
+__pycache__/
+*.pyc
+*.pyo
+
+# Node
+node_modules/
+npm-debug.log
+
+# Logs
+*.log
+
+# Backups
+*.bak
+backup_*/
+
+# Wrangler
+.wrangler/
+worker/.wrangler/
+
+# OS
+.DS_Store
+Thumbs.db

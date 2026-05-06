@@ -1,0 +1,48 @@
+{
+  "notes": "Manual TMDB overrides for titles that failed auto-matching.",
+  "movies": {
+    "fUOE57375I7A667": { "title_english": "The Ancestral Home",         "tmdb_id": "" },
+    "Ac56eefeUI81cEO": { "title_english": "Pretty Crazy",               "tmdb_id": "" },
+    "7e4Aeb22Uea6EO8": { "title_english": "Cesium Fallout",             "tmdb_id": "" },
+    "81948868I24Ac42": { "title_english": "Crazy Romance",              "tmdb_id": "" },
+    "fE5Of343bU98IAb": { "title_english": "Source Code",                "tmdb_id": "49538" },
+    "0UeAdEce5d3b81O": { "title_english": "Detective Chinatown 3",      "tmdb_id": "724089" },
+    "0AO9b9EUI88648f": { "title_english": "Lost in the Stars",          "tmdb_id": "" },
+    "eb76ba1OcE0U88e": { "title_english": "Decoded",                    "tmdb_id": "" },
+    "9762O1EIe97AcUe": { "title_english": "Homecoming",                 "tmdb_id": "" },
+    "U44b56IO6E8baeb": { "title_english": "6/45",                       "tmdb_id": "1007757" },
+    "1AU79Ie6b382E6O": { "title_english": "Successor",                  "tmdb_id": "" },
+    "EIe1A6a5fdaOaeU": { "title_english": "A Legend",                   "tmdb_id": "" },
+    "cf456dO6AEIUc0e": { "title_english": "PK",                         "tmdb_id": "245017" },
+    "b8OAdfE36IaUf61": { "title_english": "The Roundup: Punishment",    "tmdb_id": "1196105" },
+    "Efd22466bed68UO": { "title_english": "Handsome Guys",              "tmdb_id": "" }
+  },
+  "series": {
+    "Twelve": {
+      "title_english": "Twelve",
+      "tmdb_id": "",
+      "episodes": {
+        "81IO8f2e6f70eUA": "S01E01",
+        "ffIbO0E6U84Aa86": "S01E02",
+        "8aIA25bE06bOebe": "S01E03",
+        "IU8b9Ebfaf1fA6O": "S01E04",
+        "OfbdUc35E61I80f": "S01E05",
+        "a2Ecf6678A8cI9O": "S01E06",
+        "8d8UEObIc71c926": "S01E07",
+        "O0I24Eb8A84c2d8": "S01E08"
+      }
+    },
+    "S Line": {
+      "title_english": "S Line",
+      "tmdb_id": "",
+      "episodes": {
+        "5OA978aa6a1IE55": "S01E01",
+        "861Ie7Ub68OEA06": "S01E02",
+        "ecI6eUc8572A1eO": "S01E03",
+        "37faAE7a884O56U": "S01E04",
+        "6cbIOE8aAa89818": "S01E05",
+        "E4UO9886A3ed6I8": "S01E06"
+      }
+    }
+  }
+}
