@@ -371,7 +371,7 @@ def make_manifest(token: str) -> dict:
         "logo": "https://khdiamond.net/wp-content/uploads/2025/02/khdiamond-logo.png",
         "resources": ["catalog", "meta", "stream"],
         "types": ["movie", "series"],
-        "idPrefixes": [f"khd_{token}_"],
+        "idPrefixes": [f"khd_{token}_", "tt"],
         "catalogs": [
             {"type": "movie",  "id": f"khdiamond_movies_{token}",  "name": "KhDiamond Movies",  "extra": [{"name": "search", "isRequired": False}]},
             {"type": "series", "id": f"khdiamond_series_{token}", "name": "KhDiamond Series", "extra": [{"name": "search", "isRequired": False}]},
@@ -416,11 +416,15 @@ async def user_catalog(token: str, type: str, id: str, request: Request):
 @app.get("/u/{token}/meta/{type}/{id}.json")
 async def user_meta(token: str, type: str, id: str):
     prefix = f"khd_{token}_"
-    if not id.startswith(prefix):
+    if id.startswith(prefix):
+        real_id = "khd_" + id[len(prefix):]
+        catalog = load_catalog(token)
+        item = next((m for m in catalog if m.get("khd_id") == real_id), None)
+    elif id.startswith("tt"):
+        catalog = load_catalog(token)
+        item = next((m for m in catalog if m.get("imdb_id") == id), None)
+    else:
         return JSONResponse({"meta": None}, headers=CORS_HEADERS)
-    real_id = "khd_" + id[len(prefix):]
-    catalog = load_catalog(token)
-    item = next((m for m in catalog if m.get("khd_id") == real_id), None)
     if not item:
         return JSONResponse({"meta": None}, headers=CORS_HEADERS)
     desc = (item.get("title_khmer", "") + "\n\n" if item.get("title_khmer") else "") + item.get("overview", "")
@@ -437,11 +441,15 @@ async def user_meta(token: str, type: str, id: str):
 @app.get("/u/{token}/stream/{type}/{id}.json")
 async def user_stream(token: str, type: str, id: str):
     prefix = f"khd_{token}_"
-    if not id.startswith(prefix):
+    if id.startswith(prefix):
+        real_id = "khd_" + id[len(prefix):]
+        catalog = load_catalog(token)
+        item = next((m for m in catalog if m.get("khd_id") == real_id), None)
+    elif id.startswith("tt"):
+        catalog = load_catalog(token)
+        item = next((m for m in catalog if m.get("imdb_id") == id), None)
+    else:
         return JSONResponse({"streams": []}, headers=CORS_HEADERS)
-    real_id = "khd_" + id[len(prefix):]
-    catalog = load_catalog(token)
-    item = next((m for m in catalog if m.get("khd_id") == real_id), None)
     if not item or not item.get("movie_id"):
         return JSONResponse({"streams": []}, headers=CORS_HEADERS)
     return JSONResponse({"streams": build_streams(item)}, headers=CORS_HEADERS)

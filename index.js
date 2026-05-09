@@ -49,7 +49,7 @@ const manifest = {
   logo: "https://khdiamond.net/wp-content/uploads/2025/02/khdiamond-logo.png",
   resources: ["catalog", "meta", "stream"],
   types: ["movie", "series"],
-  idPrefixes: ["khd_"],
+  idPrefixes: ["khd_", "tt"],
   catalogs: [
     {
       type: "movie",
@@ -101,9 +101,9 @@ builder.defineCatalogHandler(function({ type, id, extra }) {
 });
 
 builder.defineMetaHandler(function({ type, id }) {
-  if (!id.startsWith("khd_")) return Promise.resolve({ meta: null });
+  if (!id.startsWith("khd_") && !id.startsWith("tt")) return Promise.resolve({ meta: null });
   const catalog = getCatalog();
-  const item = catalog.find(function(m) { return m.khd_id === id; });
+  const item = catalog.find(function(m) { return m.khd_id === id || m.imdb_id === id; });
   if (!item) return Promise.resolve({ meta: null });
   const desc = (item.title_khmer ? item.title_khmer + "\n\n" : "") + (item.overview || "");
   const meta = {
@@ -121,9 +121,9 @@ builder.defineMetaHandler(function({ type, id }) {
 });
 
 builder.defineStreamHandler(function({ type, id }) {
-  if (!id.startsWith("khd_")) return Promise.resolve({ streams: [] });
+  if (!id.startsWith("khd_") && !id.startsWith("tt")) return Promise.resolve({ streams: [] });
   const catalog = getCatalog();
-  const item = catalog.find(function(m) { return m.khd_id === id; });
+  const item = catalog.find(function(m) { return m.khd_id === id || m.imdb_id === id; });
   if (!item || !item.movie_id) return Promise.resolve({ streams: [] });
 
   const streams = [];
