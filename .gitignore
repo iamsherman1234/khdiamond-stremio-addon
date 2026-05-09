@@ -36,3 +36,5 @@ worker/.wrangler/
 # OS
 .DS_Store
 Thumbs.db
+full_catalog.json
+full_catalog_cache.json
