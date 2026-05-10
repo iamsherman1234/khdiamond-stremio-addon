@@ -19,6 +19,8 @@ import json
 import time
 import hashlib
 from pathlib import Path
+from http.cookiejar import MozillaCookieJar
+import re as _re
 
 import requests
 from bs4 import BeautifulSoup
@@ -33,6 +35,8 @@ SOURCES = [
     {"kind": "movie",  "type": "movie",  "base_url": "https://khdiamond.net/movies/page/{}/"},
     {"kind": "tvshow", "type": "series", "base_url": "https://khdiamond.net/tvshows/page/{}/"},
 ]
+
+FREE_GENRE_URL = "https://khdiamond.net/genre/%E1%9E%A5%E1%9E%8F%E1%9E%82%E1%9E%B7%E1%9E%8F%E1%9E%90%E1%9F%92%E1%9E%9B%E1%9F%83/page/{}/"
 
 UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:149.0) "
       "Gecko/20100101 Firefox/149.0")
@@ -246,10 +250,116 @@ def extract_english_from_khmer_title(title: str) -> str:
 
 # ── Main ──────────────────────────────────────────────────────────────────────
 
+COOKIES_PATH = Path(os.environ.get("COOKIES_PATH", "/root/khdiamond/cookies.txt"))
+AJAX_URL = "https://khdiamond.net/wp-admin/admin-ajax.php"
+EMBED_ID_RE = _re.compile(r"player\.khdiamond\.net/\d+/\d+/([A-Za-z0-9]+)")
+POSTID_RE = _re.compile(r"postid-(\d+)")
+
+
+def make_auth_session() -> requests.Session:
+    """Session with cookies for resolving free movie streams."""
+    if not COOKIES_PATH.exists():
+        return None
+    jar = MozillaCookieJar(str(COOKIES_PATH))
+    jar.load(ignore_discard=True, ignore_expires=True)
+    s = requests.Session()
+    s.cookies = jar
+    s.headers.update({
+        "User-Agent": UA,
+        "Referer": "https://khdiamond.net/",
+        "X-Requested-With": "XMLHttpRequest",
+    })
+    return s
+
+
+def resolve_free_stream(auth_session, page_url: str, kind: str) -> dict:
+    """Resolve movie_id for a free item using cookies."""
+    if not auth_session:
+        return {"movie_id": "", "movie_id_4k": ""}
+    try:
+        r = auth_session.get(page_url, timeout=20)
+        m = POSTID_RE.search(r.text)
+        if not m:
+            return {"movie_id": "", "movie_id_4k": ""}
+        post_id = m.group(1)
+        media_type = "tv" if kind == "series" else "movie"
+        payload = {
+            "action": "doo_player_ajax",
+            "post": post_id,
+            "nume": "1",
+            "type": media_type,
+        }
+        resp = auth_session.post(AJAX_URL, data=payload,
+                                 headers={"Referer": page_url}, timeout=20)
+        if resp.status_code != 200:
+            return {"movie_id": "", "movie_id_4k": ""}
+        embed = resp.json().get("embed_url", "")
+        mid = EMBED_ID_RE.search(embed)
+        movie_id = mid.group(1) if mid else ""
+
+        # Check 4K
+        movie_id_4k = ""
+        has_4k = "data-nume=\'2\'" in r.text or 'data-nume="2"' in r.text
+        if has_4k and movie_id:
+            payload["nume"] = "2"
+            resp4k = auth_session.post(AJAX_URL, data=payload,
+                                       headers={"Referer": page_url}, timeout=20)
+            if resp4k.status_code == 200:
+                embed4k = resp4k.json().get("embed_url", "")
+                mid4k = EMBED_ID_RE.search(embed4k)
+                if mid4k:
+                    movie_id_4k = mid4k.group(1)
+
+        return {"movie_id": movie_id, "movie_id_4k": movie_id_4k}
+    except Exception as e:
+        print(f"    resolve_free_stream error: {e}")
+        return {"movie_id": "", "movie_id_4k": ""}
+
+
+def get_free_slugs(session: requests.Session) -> set:
+    """Scrape all slugs from the free genre pages."""
+    free_slugs = set()
+    page = 1
+    while True:
+        url = FREE_GENRE_URL.format(page)
+        try:
+            r = session.get(url, timeout=20)
+            if r.status_code == 404:
+                break
+            soup = BeautifulSoup(r.text, "html.parser")
+            articles = soup.find_all("article")
+            if not articles:
+                break
+            for art in articles:
+                h3 = art.find("h3")
+                if not h3:
+                    continue
+                link = h3.find("a", href=True)
+                if not link:
+                    continue
+                slug = slug_from_url(link["href"])
+                free_slugs.add(slug)
+            page += 1
+            time.sleep(PAGE_DELAY)
+        except Exception as e:
+            print(f"  Error scraping free page {page}: {e}")
+            break
+    print(f"✓ Found {len(free_slugs)} free slugs")
+    return free_slugs
+
+
 def main():
     session = make_session()
     cache = load_cache()
     all_items = []
+
+    print("\n→ Scraping free genre slugs...")
+    free_slugs = get_free_slugs(session)
+    auth_session = make_auth_session()
+    if auth_session:
+        print("✓ Auth session ready for free stream resolution")
+    else:
+        print("⚠ No cookies found — free streams won't be resolved")
 
     for source in SOURCES:
         kind      = source["kind"]
@@ -291,8 +401,18 @@ def main():
         cache_key  = hashlib.md5(slug.encode()).hexdigest()
 
         if cache_key in cache and cache[cache_key].get("overview_en") is not None:
-            print(f"  [{i:>3}/{len(all_items)}] reused  {title_khmer[:55]}")
             entry = cache[cache_key]
+            entry["is_free"] = slug in free_slugs
+            # Re-resolve stream for free items that don't have movie_id yet
+            if entry["is_free"] and not entry.get("movie_id") and auth_session:
+                print(f"  [{i:>3}/{len(all_items)}] resolving free stream {title_khmer[:40]}")
+                streams = resolve_free_stream(auth_session, item["page_url"], stype)
+                entry["movie_id"] = streams["movie_id"]
+                entry["movie_id_4k"] = streams["movie_id_4k"]
+                cache[cache_key] = entry
+                time.sleep(PAGE_DELAY)
+            else:
+                print(f"  [{i:>3}/{len(all_items)}] reused  {title_khmer[:55]}")
             catalog.append(entry)
             continue
 
@@ -311,9 +431,22 @@ def main():
         # Build khd_id from slug
         khd_id = f"khdcat_{slug}"
 
+        # Resolve stream for free items
+        movie_id = ""
+        movie_id_4k = ""
+        if slug in free_slugs and auth_session:
+            print(f"    → resolving free stream for {slug}")
+            streams = resolve_free_stream(auth_session, item["page_url"], stype)
+            movie_id = streams["movie_id"]
+            movie_id_4k = streams["movie_id_4k"]
+            time.sleep(PAGE_DELAY)
+
         entry = {
             "khd_id":        khd_id,
             "slug":          slug,
+            "is_free":       slug in free_slugs,
+            "movie_id":      movie_id,
+            "movie_id_4k":   movie_id_4k,
             "type":          stype,
             "title_khmer":   title_khmer,
             "title_english": tmdb.get("title_english") or title_english or title_khmer,
