@@ -402,7 +402,7 @@ def main():
 
         if cache_key in cache and cache[cache_key].get("overview_en") is not None:
             entry = cache[cache_key]
-            entry["is_free"] = slug in free_slugs
+            entry["is_free"] = slug in free_slugs or "ឥតគិតថ្លៃ" in (item.get("title","") or "")
             # Re-resolve stream for free items that don't have movie_id yet
             if entry["is_free"] and not entry.get("movie_id") and auth_session:
                 print(f"  [{i:>3}/{len(all_items)}] resolving free stream {title_khmer[:40]}")
@@ -444,7 +444,7 @@ def main():
         entry = {
             "khd_id":        khd_id,
             "slug":          slug,
-            "is_free":       slug in free_slugs,
+            "is_free":       slug in free_slugs or "ឥតគិតថ្លៃ" in title_khmer,
             "movie_id":      movie_id,
             "movie_id_4k":   movie_id_4k,
             "type":          stype,
