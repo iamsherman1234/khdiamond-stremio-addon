@@ -34,10 +34,7 @@ RAW_TAB        = "library_raw"
 CATALOG_OUT    = Path("/root/khdiamond/catalog.json")
 COOKIES_PATH   = Path(os.environ.get("COOKIES_PATH", "/tmp/cookies.txt"))
 
-TMDB_TOKEN = os.environ.get(
-    "TMDB_ACCESS_TOKEN",
-    "eyJhbGciOiJIUzI1NiJ9.eyJhdWQiOiI3YzAxN2Q1OGY1NDEwOTU3YWFlOTllNDk5NTIxZTk1YiIsIm5iZiI6MTc2NzUwMjg2Ny45NjMsInN1YiI6IjY5NTlmNDEzYjU3ZWRjZWFhYmQ3OTY2MiIsInNjb3BlcyI6WyJhcGlfcmVhZCJdLCJ2ZXJzaW9uIjoxfQ.bzpgjaNeTfbBntDDJZUIqLYgf0ww_I3hf30xC0i2hRg"
-)
+TMDB_TOKEN = os.environ.get("TMDB_ACCESS_TOKEN", "")
 TMDB_BASE    = "https://api.themoviedb.org/3"
 TMDB_IMG     = "https://image.tmdb.org/t/p"
 
@@ -181,7 +178,7 @@ def tmdb_headers() -> dict:
 
 def get_imdb_id(title: str, media_type: str) -> str:
     """Search TMDB for IMDB ID only. Returns '' if not found."""
-    if not title:
+    if not title or not TMDB_TOKEN:
         return ""
 
     endpoint = "tv" if media_type == "series" else "movie"

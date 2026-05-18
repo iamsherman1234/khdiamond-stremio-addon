@@ -9,7 +9,7 @@ const CATALOG_PATH = process.env.CATALOG_PATH || "./catalog.json";
 
 const MF_PRIMARY   = process.env.MEDIAFLOW_URL     || "https://sudolocal.qzz.io/mediaflow-py";
 const MF_FALLBACK  = process.env.MEDIAFLOW_URL2    || "https://mediaflow-proxy-l98z.onrender.com";
-const MF_PASSWORD  = process.env.MEDIAFLOW_PASSWORD || "240995Layan";
+const MF_PASSWORD  = process.env.MEDIAFLOW_PASSWORD || "";
 
 const CDN_URLS = [
   "https://media-1.khdmcloud.online/hls/{movie_id}/{quality}.m3u8",
@@ -19,12 +19,24 @@ const CDN_URLS = [
 const MF_SERVERS = [
   { base: MF_PRIMARY,  label: "S10" },
   { base: MF_FALLBACK, label: "Cloud" },
-];
+].filter(function(s) { return Boolean(s.base); });
+
+let catalogCache = { path: "", mtimeMs: 0, items: [] };
 
 function loadCatalog() {
   try {
-    const raw = fs.readFileSync(path.resolve(CATALOG_PATH), "utf-8");
-    return JSON.parse(raw);
+    const resolvedPath = path.resolve(CATALOG_PATH);
+    const stat = fs.statSync(resolvedPath);
+    if (catalogCache.path === resolvedPath && catalogCache.mtimeMs === stat.mtimeMs) {
+      return catalogCache.items;
+    }
+    const raw = fs.readFileSync(resolvedPath, "utf-8");
+    const parsed = JSON.parse(raw);
+    if (!Array.isArray(parsed)) {
+      throw new Error("catalog root must be an array");
+    }
+    catalogCache = { path: resolvedPath, mtimeMs: stat.mtimeMs, items: parsed };
+    return parsed;
   } catch (e) {
     console.error("Could not load catalog.json:", e.message);
     return [];
@@ -36,9 +48,21 @@ function getCatalog() {
 }
 
 function makeProxyUrl(mfBase, originalUrl) {
+  if (!MF_PASSWORD) return "";
   return mfBase + "/proxy/hls/manifest.m3u8" +
     "?api_password=" + encodeURIComponent(MF_PASSWORD) +
     "&d=" + encodeURIComponent(originalUrl);
+}
+
+function normalizeImdbId(id) {
+  if (!id) return "";
+  const value = String(id).trim();
+  if (!value) return "";
+  return value.startsWith("tt") ? value : "tt" + value.replace(/^tt/, "");
+}
+
+function itemMatchesId(item, id) {
+  return item.khd_id === id || normalizeImdbId(item.imdb_id) === id;
 }
 
 const manifest = {
@@ -81,12 +105,14 @@ builder.defineCatalogHandler(function({ type, id, extra }) {
   if (search) {
     items = items.filter(function(m) {
       return (m.title_english || "").toLowerCase().includes(search) ||
-             (m.title_khmer || "").toLowerCase().includes(search);
+             (m.title_khmer || "").toLowerCase().includes(search) ||
+             (m.slug || "").toLowerCase().includes(search);
     });
   }
   const metas = items.map(function(m) {
+    const imdbId = normalizeImdbId(m.imdb_id);
     return {
-      id: m.khd_id,
+      id: imdbId || m.khd_id,
       type: m.type,
       name: m.title_english,
       poster: m.poster || "",
@@ -101,14 +127,14 @@ builder.defineCatalogHandler(function({ type, id, extra }) {
 });
 
 builder.defineMetaHandler(function({ type, id }) {
-  // Only handle khd_ IDs — let Cinemeta/IMDB handle tt IDs
-  if (!id.startsWith("khd_")) return Promise.resolve({ meta: null });
+  if (!id.startsWith("khd_") && !id.startsWith("tt")) return Promise.resolve({ meta: null });
   const catalog = getCatalog();
-  const item = catalog.find(function(m) { return m.khd_id === id; });
+  const item = catalog.find(function(m) { return itemMatchesId(m, id); });
   if (!item) return Promise.resolve({ meta: null });
   const desc = (item.title_khmer ? item.title_khmer + "\n\n" : "") + (item.overview || "");
+  const imdbId = normalizeImdbId(item.imdb_id);
   const meta = {
-    id: item.khd_id,
+    id: imdbId || item.khd_id,
     type: item.type,
     name: item.title_english,
     poster: item.poster || "",
@@ -123,8 +149,9 @@ builder.defineMetaHandler(function({ type, id }) {
 
 builder.defineStreamHandler(function({ type, id }) {
   if (!id.startsWith("khd_") && !id.startsWith("tt")) return Promise.resolve({ streams: [] });
+  if (!MF_PASSWORD) return Promise.resolve({ streams: [] });
   const catalog = getCatalog();
-  const item = catalog.find(function(m) { return m.khd_id === id || m.imdb_id === id; });
+  const item = catalog.find(function(m) { return itemMatchesId(m, id); });
   if (!item || !item.movie_id) return Promise.resolve({ streams: [] });
 
   const streams = [];
@@ -148,8 +175,10 @@ builder.defineStreamHandler(function({ type, id }) {
         .replace("{quality}", q.quality);
 
       for (const mf of MF_SERVERS) {
+        const url = makeProxyUrl(mf.base, originalUrl);
+        if (!url) continue;
         streams.push({
-          url: makeProxyUrl(mf.base, originalUrl),
+          url: url,
           name: q.name,
           title: q.label + " | " + cdnLabel + " | " + mf.label + "\n" + title,
           behaviorHints: { notWebReady: false },

@@ -118,6 +118,8 @@ export MEDIAFLOW_URL2="https://your-fallback.onrender.com"
 export MEDIAFLOW_PASSWORD="your_password"
 export CLOUDFLARE_API_TOKEN="your_cf_token"
 export CF_ACCOUNT_ID="your_cf_account_id"
+export CF_KV_NAMESPACE="your_streaming_catalog_kv_namespace_id"
+export CF_FULL_CATALOG_KV_NAMESPACE="your_full_catalog_kv_namespace_id"
 export ADDON_URL="https://your-domain/khdiamond"
 export COOKIES_PATH="/root/khdiamond/cookies.txt"
 ```
@@ -148,8 +150,6 @@ npm install
 wrangler login
 wrangler kv namespace create CATALOG
 # Note the namespace ID, update wrangler.toml
-wrangler secret put MEDIAFLOW_URL
-wrangler secret put MEDIAFLOW_URL2
 wrangler secret put MEDIAFLOW_PASSWORD
 wrangler deploy
 ```
@@ -163,7 +163,7 @@ python3 server_resolve.py
 python3 sync_catalog.py
 
 # Upload to Cloudflare KV
-CF_ACCOUNT_ID="your_id" python3 scripts/upload_catalog_to_kv.py
+python3 scripts/upload_catalog_to_kv.py
 ```
 
 ### 6. Start Addon Servers
@@ -365,6 +365,8 @@ journalctl -u khdiamond-ui -n 50
 | `MEDIAFLOW_PASSWORD` | MediaFlow API password | Streaming |
 | `CLOUDFLARE_API_TOKEN` | Cloudflare API token | KV upload |
 | `CF_ACCOUNT_ID` | Cloudflare account ID | KV upload |
+| `CF_KV_NAMESPACE` | Streaming catalog KV namespace ID | KV upload |
+| `CF_FULL_CATALOG_KV_NAMESPACE` | Public full catalog KV namespace ID | Full catalog KV upload |
 | `ADDON_URL` | Public URL of the S10+ addon | Addon manifest |
 | `COOKIES_PATH` | Path to khdiamond.net cookies.txt | Scraper |
 
