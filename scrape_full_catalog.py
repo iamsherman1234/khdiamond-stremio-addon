@@ -38,6 +38,13 @@ SOURCES = [
 
 FREE_GENRE_URL = "https://khdiamond.net/genre/%E1%9E%A5%E1%9E%8F%E1%9E%82%E1%9E%B7%E1%9E%8F%E1%9E%90%E1%9F%92%E1%9E%9B%E1%9F%83/page/{}/"
 
+MANUAL_METADATA_BY_SLUG = {
+    "hoppers": {"imdb_id": "tt26443616", "year": "2026"},
+    "sitaare-zameen-par": {"imdb_id": "tt27235410", "year": "2025"},
+    "harry-potter-and-the-half-blood-prince": {"imdb_id": "tt0417741", "year": "2009"},
+    "ready-player-one": {"imdb_id": "tt1677720", "year": "2018"},
+}
+
 UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:149.0) "
       "Gecko/20100101 Firefox/149.0")
 
@@ -73,6 +80,16 @@ def save_cache(cache: dict):
 def slug_from_url(url: str) -> str:
     """Extract slug from khdiamond URL."""
     return url.rstrip("/").rsplit("/", 1)[-1]
+
+
+def apply_manual_metadata(entry: dict) -> dict:
+    overrides = MANUAL_METADATA_BY_SLUG.get(entry.get("slug", ""))
+    if not overrides:
+        return entry
+    for key, value in overrides.items():
+        if value and not entry.get(key):
+            entry[key] = value
+    return entry
 
 
 def scrape_listing_page(session: requests.Session, url: str) -> list[dict]:
@@ -224,17 +241,36 @@ def fetch_tmdb(title: str, year: str, media_type: str) -> dict:
 
 def scrape_khmer_overview(session: requests.Session, page_url: str) -> str:
     """Scrape Khmer overview from individual movie/series page."""
+    return scrape_page_details(session, page_url).get("overview", "")
+
+
+def scrape_page_details(session: requests.Session, page_url: str) -> dict:
+    """Scrape stable detail-page metadata that listing/TMDB can miss."""
+    details = {"overview": "", "poster": "", "year": "", "runtime": ""}
     try:
         r = session.get(page_url, timeout=20)
         if r.status_code != 200:
-            return ""
+            return details
         soup = BeautifulSoup(r.text, "html.parser")
+        poster = soup.select_one("div.sheader div.poster img[src], div.poster img[src]")
+        if poster:
+            src = poster.get("src", "")
+            if src.startswith("http") and "sss1.png" not in src:
+                details["poster"] = src
+        date_tag = soup.select_one("span.date")
+        if date_tag:
+            year_m = re.search(r"\d{4}", date_tag.get_text(strip=True))
+            if year_m:
+                details["year"] = year_m.group(0)
+        runtime_tag = soup.select_one("span.runtime")
+        if runtime_tag:
+            details["runtime"] = runtime_tag.get_text(strip=True)
         desc = soup.select_one("div.wp-content p")
         if desc:
-            return desc.get_text(strip=True)
+            details["overview"] = desc.get_text(strip=True)
     except Exception:
         pass
-    return ""
+    return details
 
 
 def extract_english_from_khmer_title(title: str) -> str:
@@ -402,7 +438,21 @@ def main():
 
         if cache_key in cache and cache[cache_key].get("overview_en") is not None:
             entry = cache[cache_key]
-            entry["is_free"] = slug in free_slugs or "ឥតគិតថ្លៃ" in (item.get("title","") or "")
+            entry["is_free"] = slug in free_slugs or "ឥតគិតថ្លៃ" in title_khmer
+            apply_manual_metadata(entry)
+            if not entry.get("poster"):
+                print(f"  [{i:>3}/{len(all_items)}] refreshing poster {title_khmer[:40]}")
+                details = scrape_page_details(session, item["page_url"])
+                if details.get("poster"):
+                    entry["poster"] = details["poster"]
+                if details.get("overview") and not entry.get("overview"):
+                    entry["overview"] = details["overview"]
+                if details.get("year") and not entry.get("year"):
+                    entry["year"] = details["year"]
+                if details.get("runtime") and not entry.get("runtime"):
+                    entry["runtime"] = details["runtime"]
+                cache[cache_key] = entry
+                time.sleep(PAGE_DELAY)
             # Re-resolve stream for free items that don't have movie_id yet
             if entry["is_free"] and not entry.get("movie_id") and auth_session:
                 print(f"  [{i:>3}/{len(all_items)}] resolving free stream {title_khmer[:40]}")
@@ -424,8 +474,9 @@ def main():
 
         tmdb = fetch_tmdb(search_title, "", media_type)
 
-        # Scrape Khmer overview from individual page
-        khmer_overview = scrape_khmer_overview(session, item["page_url"])
+        # Scrape detail-page fields that listing/TMDB can miss
+        details = scrape_page_details(session, item["page_url"])
+        khmer_overview = details.get("overview", "")
         time.sleep(PAGE_DELAY)
 
         # Build khd_id from slug
@@ -450,8 +501,8 @@ def main():
             "type":          stype,
             "title_khmer":   title_khmer,
             "title_english": tmdb.get("title_english") or title_english or title_khmer,
-            "year":          tmdb.get("year", ""),
-            "poster":        item.get("poster") if item.get("poster") and "sss" not in item.get("poster","") else tmdb.get("tmdb_poster", ""),
+            "year":          tmdb.get("year") or details.get("year", ""),
+            "poster":        item.get("poster") if item.get("poster") and "sss" not in item.get("poster","") else details.get("poster") or tmdb.get("tmdb_poster", ""),
             "tmdb_poster":   tmdb.get("tmdb_poster", ""),
             "backdrop":      tmdb.get("backdrop", ""),
             "genres":        tmdb.get("genres", []),
@@ -460,9 +511,10 @@ def main():
             "imdb_id":       tmdb.get("imdb_id", ""),
             "tmdb_id":       tmdb.get("tmdb_id", ""),
             "imdb_rating":   item.get("rating") or tmdb.get("imdb_rating", ""),
-            "runtime":       tmdb.get("runtime", ""),
+            "runtime":       tmdb.get("runtime") or details.get("runtime", ""),
             "page_url":      item["page_url"],
         }
+        apply_manual_metadata(entry)
 
         cache[cache_key] = entry
         catalog.append(entry)
