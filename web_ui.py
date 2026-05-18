@@ -82,11 +82,28 @@ def load_catalog(token: str):
     if not cat_path.exists():
         return []
     try:
-        return json.loads(cat_path.read_text())
+        catalog = json.loads(cat_path.read_text())
+        return catalog if isinstance(catalog, list) else []
     except Exception:
         return []
 
+def normalize_imdb_id(value: str) -> str:
+    value = str(value or "").strip()
+    if not value:
+        return ""
+    return value if value.startswith("tt") else "tt" + value.removeprefix("tt")
+
+def item_matches_id(item: dict, token: str, id: str) -> bool:
+    prefix = f"khd_{token}_"
+    if id.startswith(prefix):
+        return item.get("khd_id") == "khd_" + id[len(prefix):]
+    if id.startswith("tt"):
+        return normalize_imdb_id(item.get("imdb_id")) == id
+    return False
+
 def make_proxy_url(mf_base: str, original_url: str) -> str:
+    if not MF_PASSWORD:
+        return ""
     from urllib.parse import quote
     return (mf_base + "/proxy/hls/manifest.m3u8"
             + "?api_password=" + quote(MF_PASSWORD)
@@ -399,10 +416,11 @@ async def user_catalog(token: str, type: str, id: str, request: Request):
     if search:
         items = [m for m in items if
                  search in (m.get("title_english") or "").lower() or
-                 search in (m.get("title_khmer") or "").lower()]
+                 search in (m.get("title_khmer") or "").lower() or
+                 search in (m.get("slug") or "").lower()]
     prefix = f"khd_{token}_"
     metas = [{
-        "id": prefix + m["khd_id"].replace("khd_", ""),
+        "id": normalize_imdb_id(m.get("imdb_id")) or prefix + m["khd_id"].replace("khd_", ""),
         "type": m["type"],
         "name": m.get("title_english", ""),
         "poster": m.get("poster", ""),
@@ -415,16 +433,10 @@ async def user_catalog(token: str, type: str, id: str, request: Request):
 
 @app.get("/u/{token}/meta/{type}/{id}.json")
 async def user_meta(token: str, type: str, id: str):
-    prefix = f"khd_{token}_"
-    if id.startswith(prefix):
-        real_id = "khd_" + id[len(prefix):]
-        catalog = load_catalog(token)
-        item = next((m for m in catalog if m.get("khd_id") == real_id), None)
-    elif id.startswith("tt"):
-        catalog = load_catalog(token)
-        item = next((m for m in catalog if m.get("imdb_id") == id), None)
-    else:
+    if not (id.startswith(f"khd_{token}_") or id.startswith("tt")):
         return JSONResponse({"meta": None}, headers=CORS_HEADERS)
+    catalog = load_catalog(token)
+    item = next((m for m in catalog if item_matches_id(m, token, id)), None)
     if not item:
         return JSONResponse({"meta": None}, headers=CORS_HEADERS)
     desc = (item.get("title_khmer", "") + "\n\n" if item.get("title_khmer") else "") + item.get("overview", "")
@@ -440,16 +452,10 @@ async def user_meta(token: str, type: str, id: str):
 
 @app.get("/u/{token}/stream/{type}/{id}.json")
 async def user_stream(token: str, type: str, id: str):
-    prefix = f"khd_{token}_"
-    if id.startswith(prefix):
-        real_id = "khd_" + id[len(prefix):]
-        catalog = load_catalog(token)
-        item = next((m for m in catalog if m.get("khd_id") == real_id), None)
-    elif id.startswith("tt"):
-        catalog = load_catalog(token)
-        item = next((m for m in catalog if m.get("imdb_id") == id), None)
-    else:
+    if not (id.startswith(f"khd_{token}_") or id.startswith("tt")):
         return JSONResponse({"streams": []}, headers=CORS_HEADERS)
+    catalog = load_catalog(token)
+    item = next((m for m in catalog if item_matches_id(m, token, id)), None)
     if not item or not item.get("movie_id"):
         return JSONResponse({"streams": []}, headers=CORS_HEADERS)
     return JSONResponse({"streams": build_streams(item)}, headers=CORS_HEADERS)
