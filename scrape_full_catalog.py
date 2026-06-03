@@ -313,12 +313,13 @@ def scrape_page_details(session: requests.Session, page_url: str) -> dict:
 
 def extract_english_from_khmer_title(title: str) -> str:
     """Try to extract English part from mixed Khmer-English title."""
+    title = re.sub(r"\([^A-Za-z0-9)]*\)", "", title).strip()
     m = re.search(r"[–\-]\s*([A-Za-z0-9].+)$", title)
     if m:
         return m.group(1).strip()
-    m2 = re.search(r"([A-Za-z0-9][A-Za-z0-9\s\:\!\&\.\,\']+)$", title)
-    if m2:
-        return m2.group(1).strip()
+    parts = re.findall(r"[A-Za-z0-9][A-Za-z0-9\s\:\!\&\.\,\'\?]+", title)
+    if parts:
+        return max((p.strip() for p in parts), key=len).strip(" -–")
     return ""
 
 
