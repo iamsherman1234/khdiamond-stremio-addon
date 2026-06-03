@@ -148,7 +148,44 @@ def scrape_listing_page(session: requests.Session, url: str) -> list[dict]:
     return items
 
 
-def fetch_tmdb(title: str, year: str, media_type: str) -> dict:
+def text_tokens(value: str) -> set[str]:
+    return {t for t in _re.findall(r"[a-z0-9]+", str(value or "").lower()) if len(t) > 3}
+
+
+def normalized_title(value: str) -> str:
+    value = " ".join(_re.findall(r"[a-z0-9]+", str(value or "").lower()))
+    return _re.sub(r"^(the|a|an)\s+", "", value).strip()
+
+
+def score_tmdb_candidate(candidate: dict, title: str, year: str = "", overview_hint: str = "") -> float:
+    query_title = normalized_title(title)
+    names = [candidate.get("title"), candidate.get("name"), candidate.get("original_title"), candidate.get("original_name")]
+    candidate_titles = [normalized_title(n) for n in names if n]
+    score = 0.0
+
+    if query_title and any(t == query_title for t in candidate_titles):
+        score += 90
+    elif query_title and any(query_title in t or t in query_title for t in candidate_titles):
+        score += 35
+
+    release = candidate.get("release_date") or candidate.get("first_air_date") or ""
+    candidate_year = release[:4] if release else ""
+    if year and candidate_year == str(year):
+        score += 70
+    elif year and candidate_year:
+        score -= 30
+
+    hint_tokens = text_tokens(overview_hint)
+    overview_tokens = text_tokens(candidate.get("overview", ""))
+    if hint_tokens and overview_tokens:
+        overlap = len(hint_tokens & overview_tokens) / max(1, len(hint_tokens))
+        score += overlap * 120
+
+    score += min(float(candidate.get("popularity") or 0), 20) / 10
+    return score
+
+
+def fetch_tmdb(title: str, year: str, media_type: str, overview_hint: str = "") -> dict:
     """Fetch metadata from TMDB. Returns enriched dict."""
     if not TMDB_TOKEN:
         return {}
@@ -163,7 +200,8 @@ def fetch_tmdb(title: str, year: str, media_type: str) -> dict:
         if r.status_code != 200 or not r.json().get("results"):
             return {}
 
-        top = r.json()["results"][0]
+        results = r.json()["results"]
+        top = max(results, key=lambda item: score_tmdb_candidate(item, title, year, overview_hint))
         tmdb_id = top.get("id")
         time.sleep(TMDB_DELAY)
 
@@ -416,6 +454,49 @@ def resolve_series_episodes(public_session, auth_session, page_url: str, khd_id:
 def resolve_free_series_episodes(public_session, auth_session, page_url: str, khd_id: str, imdb_id: str = "") -> list[dict]:
     return resolve_series_episodes(public_session, auth_session, page_url, khd_id, imdb_id=imdb_id, resolve_streams=True)
 
+def update_series_episode_ids(entry: dict) -> None:
+    if entry.get("type") != "series":
+        return
+    public_id = normalize_imdb_id(entry.get("imdb_id", "")) or entry.get("khd_id", "")
+    khd_id = entry.get("khd_id", "")
+    if not public_id or not khd_id:
+        return
+    for ep in entry.get("episodes", []) or []:
+        season = ep.get("season") or 1
+        episode = ep.get("episode") or 1
+        ep["khd_id"] = ep.get("khd_id") or f"{khd_id}:{season}:{episode}"
+        ep["id"] = f"{public_id}:{season}:{episode}"
+
+
+def tmdb_metadata_mismatch(entry: dict) -> bool:
+    source_tokens = text_tokens(entry.get("overview", ""))
+    tmdb_tokens = text_tokens(entry.get("overview_en", "")) or text_tokens(entry.get("tmdb_overview", ""))
+    if len(source_tokens) < 5 or len(tmdb_tokens) < 5:
+        return False
+    overlap = len(source_tokens & tmdb_tokens) / max(1, len(source_tokens))
+    return overlap < 0.15
+
+
+def apply_tmdb_metadata(entry: dict, tmdb: dict) -> None:
+    field_map = {
+        "title_english": "title_english",
+        "year": "year",
+        "tmdb_id": "tmdb_id",
+        "imdb_id": "imdb_id",
+        "tmdb_poster": "tmdb_poster",
+        "backdrop": "backdrop",
+        "genres": "genres",
+        "overview_en": "overview",
+        "imdb_rating": "imdb_rating",
+        "runtime": "runtime",
+    }
+    for entry_key, tmdb_key in field_map.items():
+        value = tmdb.get(tmdb_key)
+        if value:
+            entry[entry_key] = value
+
+
+
 def resolve_free_stream(auth_session, page_url: str, kind: str) -> dict:
     """Resolve movie_id for a free item using cookies."""
     if not auth_session:
@@ -548,6 +629,22 @@ def main():
             entry = cache[cache_key]
             entry["is_free"] = slug in free_slugs or "ឥតគិតថ្លៃ" in title_khmer
             apply_manual_metadata(entry)
+            if stype == "series" and tmdb_metadata_mismatch(entry):
+                print(f"  [{i:>3}/{len(all_items)}] refreshing mismatched TMDB metadata {title_khmer[:40]}")
+                details = scrape_page_details(session, item["page_url"])
+                search_title = extract_english_from_khmer_title(title_khmer) or title_khmer
+                tmdb = fetch_tmdb(search_title, details.get("year", ""), media_type, overview_hint=details.get("overview", ""))
+                if tmdb:
+                    apply_tmdb_metadata(entry, tmdb)
+                    if details.get("overview"):
+                        entry["overview"] = details["overview"]
+                    if details.get("poster") and not entry.get("poster"):
+                        entry["poster"] = details["poster"]
+                    update_series_episode_ids(entry)
+                    cache[cache_key] = entry
+                    time.sleep(PAGE_DELAY)
+            if stype == "series":
+                update_series_episode_ids(entry)
             if not entry.get("poster"):
                 print(f"  [{i:>3}/{len(all_items)}] refreshing poster {title_khmer[:40]}")
                 details = scrape_page_details(session, item["page_url"])
@@ -586,12 +683,12 @@ def main():
 
         print(f"  [{i:>3}/{len(all_items)}] fetching {title_khmer[:55]}")
 
-        tmdb = fetch_tmdb(search_title, "", media_type)
-
-        # Scrape detail-page fields that listing/TMDB can miss
+        # Scrape detail-page fields first so TMDB matching can disambiguate common titles.
         details = scrape_page_details(session, item["page_url"])
         khmer_overview = details.get("overview", "")
         time.sleep(PAGE_DELAY)
+
+        tmdb = fetch_tmdb(search_title, details.get("year", ""), media_type, overview_hint=khmer_overview)
 
         # Build khd_id from slug
         khd_id = f"khdcat_{slug}"
