@@ -391,16 +391,20 @@ def resolve_episode_stream(auth_session, episode: dict) -> dict:
         return {"movie_id": "", "movie_id_4k": ""}
 
 
-def resolve_free_series_episodes(public_session, auth_session, page_url: str, khd_id: str) -> list[dict]:
+def resolve_series_episodes(public_session, auth_session, page_url: str, khd_id: str, resolve_streams: bool = False) -> list[dict]:
     episodes = scrape_series_episodes(public_session, page_url)
     for ep in episodes:
         ep["id"] = f"{khd_id}:{ep['season']}:{ep['episode']}"
-        if auth_session:
+        if resolve_streams and auth_session:
             streams = resolve_episode_stream(auth_session, ep)
             ep["movie_id"] = streams["movie_id"]
             ep["movie_id_4k"] = streams["movie_id_4k"]
             time.sleep(PAGE_DELAY)
     return episodes
+
+
+def resolve_free_series_episodes(public_session, auth_session, page_url: str, khd_id: str) -> list[dict]:
+    return resolve_series_episodes(public_session, auth_session, page_url, khd_id, resolve_streams=True)
 
 def resolve_free_stream(auth_session, page_url: str, kind: str) -> dict:
     """Resolve movie_id for a free item using cookies."""
@@ -547,9 +551,10 @@ def main():
                     entry["runtime"] = details["runtime"]
                 cache[cache_key] = entry
                 time.sleep(PAGE_DELAY)
-            if entry["is_free"] and stype == "series" and (not entry.get("episodes") or not any(valid_movie_id(ep.get("movie_id")) for ep in entry.get("episodes", []))):
-                print(f"  [{i:>3}/{len(all_items)}] resolving free series episodes {title_khmer[:40]}")
-                entry["episodes"] = resolve_free_series_episodes(session, auth_session, item["page_url"], entry["khd_id"])
+            if stype == "series" and (not entry.get("episodes") or (entry["is_free"] and not any(valid_movie_id(ep.get("movie_id")) for ep in entry.get("episodes", [])))):
+                action = "resolving free series episodes" if entry["is_free"] else "scraping series episodes"
+                print(f"  [{i:>3}/{len(all_items)}] {action} {title_khmer[:40]}")
+                entry["episodes"] = resolve_series_episodes(session, auth_session, item["page_url"], entry["khd_id"], resolve_streams=entry["is_free"])
                 entry["movie_id"] = ""
                 entry["movie_id_4k"] = ""
                 cache[cache_key] = entry
@@ -585,10 +590,12 @@ def main():
         movie_id = ""
         movie_id_4k = ""
         episodes = []
-        if slug in free_slugs and stype == "series":
-            print(f"    → resolving free series episodes for {slug}")
-            episodes = resolve_free_series_episodes(session, auth_session, item["page_url"], khd_id)
-        elif slug in free_slugs and auth_session:
+        is_free_item = slug in free_slugs or "ឥតគិតថ្លៃ" in title_khmer
+        if stype == "series":
+            action = "resolving free series episodes" if is_free_item else "scraping series episodes"
+            print(f"    → {action} for {slug}")
+            episodes = resolve_series_episodes(session, auth_session, item["page_url"], khd_id, resolve_streams=is_free_item)
+        elif is_free_item and auth_session:
             print(f"    → resolving free stream for {slug}")
             streams = resolve_free_stream(auth_session, item["page_url"], stype)
             movie_id = streams["movie_id"]
@@ -598,7 +605,7 @@ def main():
         entry = {
             "khd_id":        khd_id,
             "slug":          slug,
-            "is_free":       slug in free_slugs or "ឥតគិតថ្លៃ" in title_khmer,
+            "is_free":       is_free_item,
             "movie_id":      movie_id,
             "movie_id_4k":   movie_id_4k,
             "episodes":      episodes,
