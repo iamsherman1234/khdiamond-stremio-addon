@@ -290,6 +290,8 @@ COOKIES_PATH = Path(os.environ.get("COOKIES_PATH", "/root/khdiamond/cookies.txt"
 AJAX_URL = "https://khdiamond.net/wp-admin/admin-ajax.php"
 EMBED_ID_RE = _re.compile(r"player\.khdiamond\.net/\d+/\d+/([A-Za-z0-9]+)")
 POSTID_RE = _re.compile(r"postid-(\d+)")
+EPISODE_LINK_RE = _re.compile(r"href=[\"\'](https?://khdiamond\.net/episodes/[^\"\']+/)[\"\']")
+SEASON_EPISODE_RE = _re.compile(r"S(\d+)\s*-\s*E(\d+)", _re.I)
 
 
 def make_auth_session() -> requests.Session:
@@ -307,6 +309,98 @@ def make_auth_session() -> requests.Session:
     })
     return s
 
+
+
+def valid_movie_id(value: str) -> bool:
+    value = str(value or "").strip()
+    return bool(value) and value not in {"error", "undefined", "null", "none"} and bool(_re.fullmatch(r"[A-Za-z0-9]+", value))
+
+
+def scrape_series_episodes(session: requests.Session, page_url: str) -> list[dict]:
+    """Scrape episode links/season/episode labels from a KhDiamond series page."""
+    try:
+        r = session.get(page_url, timeout=20)
+        if r.status_code != 200:
+            return []
+    except Exception:
+        return []
+
+    soup = BeautifulSoup(r.text, "html.parser")
+    episodes = []
+    seen = set()
+    for card in soup.select("div.video-card, ul.episodios li"):
+        link = card.select_one("a[href*='/episodes/']")
+        if not link:
+            continue
+        ep_url = link.get("href", "")
+        if not ep_url or ep_url in seen:
+            continue
+        seen.add(ep_url)
+
+        title_el = card.select_one("div.title, div.episodiotitle a")
+        title = title_el.get_text(" ", strip=True) if title_el else slug_from_url(ep_url)
+        meta_text = card.get_text(" ", strip=True)
+        se = SEASON_EPISODE_RE.search(meta_text)
+        season = int(se.group(1)) if se else 1
+        episode = int(se.group(2)) if se else len(episodes) + 1
+        thumb_el = card.select_one("img[src]")
+        date_el = card.select_one("span.date")
+        episodes.append({
+            "id": "",
+            "season": season,
+            "episode": episode,
+            "title": title,
+            "page_url": ep_url,
+            "thumbnail": thumb_el.get("src", "") if thumb_el else "",
+            "released": date_el.get_text(strip=True) if date_el else "",
+            "movie_id": "",
+            "movie_id_4k": "",
+        })
+    return episodes
+
+
+def resolve_episode_stream(auth_session, episode: dict) -> dict:
+    if not auth_session:
+        return {"movie_id": "", "movie_id_4k": ""}
+    page_url = episode.get("page_url", "")
+    try:
+        r = auth_session.get(page_url, timeout=20)
+        m = POSTID_RE.search(r.text)
+        if not m:
+            return {"movie_id": "", "movie_id_4k": ""}
+        post_id = m.group(1)
+        payload = {"action": "doo_player_ajax", "post": post_id, "nume": "1", "type": "tv"}
+        resp = auth_session.post(AJAX_URL, data=payload, headers={"Referer": page_url}, timeout=20)
+        if resp.status_code != 200:
+            return {"movie_id": "", "movie_id_4k": ""}
+        embed = resp.json().get("embed_url", "")
+        mid = EMBED_ID_RE.search(embed)
+        movie_id = mid.group(1) if mid and valid_movie_id(mid.group(1)) else ""
+
+        movie_id_4k = ""
+        payload["nume"] = "2"
+        resp4k = auth_session.post(AJAX_URL, data=payload, headers={"Referer": page_url}, timeout=20)
+        if resp4k.status_code == 200:
+            embed4k = resp4k.json().get("embed_url", "")
+            mid4k = EMBED_ID_RE.search(embed4k)
+            if mid4k and valid_movie_id(mid4k.group(1)):
+                movie_id_4k = mid4k.group(1)
+        return {"movie_id": movie_id, "movie_id_4k": movie_id_4k}
+    except Exception as e:
+        print(f"    resolve_episode_stream error: {e}")
+        return {"movie_id": "", "movie_id_4k": ""}
+
+
+def resolve_free_series_episodes(public_session, auth_session, page_url: str, khd_id: str) -> list[dict]:
+    episodes = scrape_series_episodes(public_session, page_url)
+    for ep in episodes:
+        ep["id"] = f"{khd_id}:{ep['season']}:{ep['episode']}"
+        if auth_session:
+            streams = resolve_episode_stream(auth_session, ep)
+            ep["movie_id"] = streams["movie_id"]
+            ep["movie_id_4k"] = streams["movie_id_4k"]
+            time.sleep(PAGE_DELAY)
+    return episodes
 
 def resolve_free_stream(auth_session, page_url: str, kind: str) -> dict:
     """Resolve movie_id for a free item using cookies."""
@@ -331,7 +425,7 @@ def resolve_free_stream(auth_session, page_url: str, kind: str) -> dict:
             return {"movie_id": "", "movie_id_4k": ""}
         embed = resp.json().get("embed_url", "")
         mid = EMBED_ID_RE.search(embed)
-        movie_id = mid.group(1) if mid else ""
+        movie_id = mid.group(1) if mid and valid_movie_id(mid.group(1)) else ""
 
         # Check 4K
         movie_id_4k = ""
@@ -343,7 +437,7 @@ def resolve_free_stream(auth_session, page_url: str, kind: str) -> dict:
             if resp4k.status_code == 200:
                 embed4k = resp4k.json().get("embed_url", "")
                 mid4k = EMBED_ID_RE.search(embed4k)
-                if mid4k:
+                if mid4k and valid_movie_id(mid4k.group(1)):
                     movie_id_4k = mid4k.group(1)
 
         return {"movie_id": movie_id, "movie_id_4k": movie_id_4k}
@@ -453,8 +547,13 @@ def main():
                     entry["runtime"] = details["runtime"]
                 cache[cache_key] = entry
                 time.sleep(PAGE_DELAY)
-            # Re-resolve stream for free items that don't have movie_id yet
-            if entry["is_free"] and not entry.get("movie_id") and auth_session:
+            if entry["is_free"] and stype == "series" and (not entry.get("episodes") or not any(valid_movie_id(ep.get("movie_id")) for ep in entry.get("episodes", []))):
+                print(f"  [{i:>3}/{len(all_items)}] resolving free series episodes {title_khmer[:40]}")
+                entry["episodes"] = resolve_free_series_episodes(session, auth_session, item["page_url"], entry["khd_id"])
+                entry["movie_id"] = ""
+                entry["movie_id_4k"] = ""
+                cache[cache_key] = entry
+            elif entry["is_free"] and stype != "series" and (not valid_movie_id(entry.get("movie_id"))) and auth_session:
                 print(f"  [{i:>3}/{len(all_items)}] resolving free stream {title_khmer[:40]}")
                 streams = resolve_free_stream(auth_session, item["page_url"], stype)
                 entry["movie_id"] = streams["movie_id"]
@@ -485,7 +584,11 @@ def main():
         # Resolve stream for free items
         movie_id = ""
         movie_id_4k = ""
-        if slug in free_slugs and auth_session:
+        episodes = []
+        if slug in free_slugs and stype == "series":
+            print(f"    → resolving free series episodes for {slug}")
+            episodes = resolve_free_series_episodes(session, auth_session, item["page_url"], khd_id)
+        elif slug in free_slugs and auth_session:
             print(f"    → resolving free stream for {slug}")
             streams = resolve_free_stream(auth_session, item["page_url"], stype)
             movie_id = streams["movie_id"]
@@ -498,6 +601,7 @@ def main():
             "is_free":       slug in free_slugs or "ឥតគិតថ្លៃ" in title_khmer,
             "movie_id":      movie_id,
             "movie_id_4k":   movie_id_4k,
+            "episodes":      episodes,
             "type":          stype,
             "title_khmer":   title_khmer,
             "title_english": tmdb.get("title_english") or title_english or title_khmer,
