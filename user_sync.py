@@ -63,7 +63,9 @@ def scrape_khdiamond_page(url: str, session: requests.Session) -> dict:
     # Poster
     poster_tag = soup.select_one("div.poster img")
     if poster_tag:
-        result["poster"] = poster_tag.get("src", "")
+        result["poster"] = (poster_tag.get("data-src") or
+                            poster_tag.get("data-lazy-src") or
+                            poster_tag.get("src", ""))
     # Full title from h1
     h1 = soup.select_one("div.data h1")
     if h1:
@@ -220,15 +222,19 @@ def main():
         year       = item.get("year", "")
         page_url   = item.get("page_url", "")
         slug       = item.get("slug", "")
+        series_slug = item.get("series", "")
 
         if not movie_id:
             continue
 
         cache_key = hashlib.md5(movie_id.encode()).hexdigest()
 
-        if cache_key in cache:
+        cached = cache.get(cache_key)
+        # Older resolver output dropped the parent-series slug. That left
+        # episode entries cached without posters; refresh those entries once.
+        if cached and (kind != "episode" or cached.get("poster")):
             print(f"  [{i:>3}/{len(items)}] reused  {title[:60]}")
-            entry = cache[cache_key]
+            entry = cached
             entry["movie_id"] = movie_id
             entry["movie_id_4k"] = movie_id_4k
             catalog.append(entry)
@@ -240,11 +246,11 @@ def main():
         kh_meta = {}
         if page_url:
             # For episodes, scrape series page for poster instead of episode page
-            if kind == 'episode' and slug:
+            if kind == 'episode' and (series_slug or slug):
                 # Extract series slug: 'twelve-1x1' -> 'twelve', 's-line-1x1' -> 's-line'
-                import re
-                m = re.match(r'^(.+?)-\d+x\d+$', slug)
-                series_slug = m.group(1) if m else slug
+                if not series_slug:
+                    m = re.match(r'^(.+?)-\d+x\d+$', slug)
+                    series_slug = m.group(1) if m else slug
                 series_url = f'https://khdiamond.net/tvshows/{series_slug}/'
                 kh_meta = scrape_khdiamond_page(series_url, session)
             else:

@@ -1,42 +1,60 @@
 #!/bin/bash
-source /root/khdiamond/cron_env.sh
+set -uo pipefail
 
-USERS_DIR="/root/khdiamond/users"
+BASE_DIR="/root/khdiamond"
+USERS_DIR="$BASE_DIR/users"
 LOG="/var/log/khdiamond_users.log"
+overall_status=0
 
-echo "=== User update started: $(date) ===" >> $LOG
+source "$BASE_DIR/cron_env.sh"
+shopt -s nullglob
 
-for user_dir in $USERS_DIR/*/; do
-    token=$(basename $user_dir)
-    cookies="$user_dir/cookies.txt"
-    catalog="$user_dir/catalog.json"
+echo "=== User update started: $(date) ===" >>"$LOG"
+
+user_dirs=("$USERS_DIR"/*/)
+
+if [ "${#user_dirs[@]}" -eq 0 ]; then
+    echo "No user directories found." >>"$LOG"
+fi
+
+for user_dir in "${user_dirs[@]}"; do
+    token=$(basename "$user_dir")
+    cookies="${user_dir}cookies.txt"
+    catalog="${user_dir}catalog.json"
 
     if [ ! -f "$cookies" ]; then
-        echo "[$token] No cookies — skipping" >> $LOG
+        echo "[$token] No cookies — skipping" >>"$LOG"
+        overall_status=1
         continue
     fi
 
-    echo "[$token] Starting pipeline..." >> $LOG
+    echo "[$token] Starting pipeline..." >>"$LOG"
 
-    export USER_TOKEN=$token
-    export USER_DIR=$user_dir
-    export COOKIES_PATH=$cookies
-    export CATALOG_PATH=$catalog
+    export USER_TOKEN="$token"
+    export USER_DIR="$user_dir"
+    export COOKIES_PATH="$cookies"
+    export CATALOG_PATH="$catalog"
 
-    python3 /root/khdiamond/user_scrape.py >> $LOG 2>&1
-    if [ $? -ne 0 ]; then
-        echo "[$token] Scrape failed — skipping" >> $LOG
+    if ! python3 "$BASE_DIR/user_scrape.py" >>"$LOG" 2>&1; then
+        echo "[$token] Scrape failed — keeping existing catalog" >>"$LOG"
+        overall_status=1
         continue
     fi
 
-    python3 /root/khdiamond/user_resolve.py >> $LOG 2>&1
-    if [ $? -ne 0 ]; then
-        echo "[$token] Resolve failed — skipping" >> $LOG
+    if ! python3 "$BASE_DIR/user_resolve.py" >>"$LOG" 2>&1; then
+        echo "[$token] Resolve failed — keeping existing catalog" >>"$LOG"
+        overall_status=1
         continue
     fi
 
-    python3 /root/khdiamond/user_sync.py >> $LOG 2>&1
-    echo "[$token] Done" >> $LOG
+    if ! python3 "$BASE_DIR/user_sync.py" >>"$LOG" 2>&1; then
+        echo "[$token] Metadata sync failed — keeping existing catalog" >>"$LOG"
+        overall_status=1
+        continue
+    fi
+
+    echo "[$token] Done" >>"$LOG"
 done
 
-echo "=== User update finished: $(date) ===" >> $LOG
+echo "=== User update finished: $(date), status=$overall_status ===" >>"$LOG"
+exit "$overall_status"

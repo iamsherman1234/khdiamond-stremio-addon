@@ -13,6 +13,7 @@ from http.cookiejar import MozillaCookieJar
 import requests
 from bs4 import BeautifulSoup
 from khdiamond_http import is_login_page, library_rows
+from khdiamond_credentials import login_with_saved_credentials
 
 LIBRARY_URL  = "https://khdiamond.net/my-account/"
 COOKIES_PATH = Path(os.environ.get("COOKIES_PATH", "/root/khdiamond/cookies.txt"))
@@ -21,26 +22,43 @@ UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:149.0) "
       "Gecko/20100101 Firefox/149.0")
 
 
-def main():
-    if not COOKIES_PATH.exists():
-        sys.exit(f"❌ {COOKIES_PATH} missing — upload fresh cookies first.")
-
+def fetch_library():
     jar = MozillaCookieJar(str(COOKIES_PATH))
     jar.load(ignore_discard=True, ignore_expires=True)
     s = requests.Session()
     s.cookies = jar
     s.headers.update({"User-Agent": UA, "Referer": "https://khdiamond.net/"})
 
+    response = s.get(LIBRARY_URL, timeout=30)
+    response.raise_for_status()
+    return response
+
+
+def main():
+    if not COOKIES_PATH.exists():
+        sys.exit(f"❌ {COOKIES_PATH} missing — upload fresh cookies first.")
+
     print(f"→ GET {LIBRARY_URL}")
-    r = s.get(LIBRARY_URL, timeout=30)
-    r.raise_for_status()
+    r = fetch_library()
     html = r.text
     print(f"  ← {len(html):,} bytes")
     if is_login_page(r):
+        print("  Session expired — attempting encrypted automatic login...")
+        ok, message = login_with_saved_credentials(USER_DIR, COOKIES_PATH)
+        if ok:
+            r = fetch_library()
+            html = r.text
+            print(f"  ✓ Automatic login succeeded ({len(html):,} bytes)")
+        else:
+            print(f"  Automatic login unavailable: {message}")
+
+    if is_login_page(r):
         # Write expired marker for web UI
-        expired_path = Path(os.environ.get("USER_DIR", "/root/khdiamond")) / "expired.txt"
+        expired_path = USER_DIR / "expired.txt"
         expired_path.write_text("Cookies expired")
         sys.exit("❌ Got login page — cookies expired.")
+
+    (USER_DIR / "expired.txt").unlink(missing_ok=True)
 
     rows = library_rows(html, r.url)
 

@@ -296,7 +296,7 @@ def main():
     list_data = [{"movie_id": r["movie_id"], "movie_id_4k": r.get("movie_id_4k", ""),
                   "title": r["title"], "kind": r["kind"],
                   "year": r.get("year", ""), "page_url": r.get("page_url", ""),
-                  "slug": r.get("slug", "")}
+                  "slug": r.get("slug", ""), "series": r.get("series", "")}
                  for r in ok]
 
     out_path = USER_DIR / "list.json"
