@@ -1,0 +1,215 @@
+[1mdiff --git a/server_resolve.py b/server_resolve.py[m
+[1mindex bf6deac..355ce4d 100644[m
+[1m--- a/server_resolve.py[m
+[1m+++ b/server_resolve.py[m
+[36m@@ -32,7 +32,7 @@[m [mRETRY_DELAY  = 2.0[m
+ MAX_RETRIES  = 4[m
+ BACKOFF_BASE = 3[m
+ [m
+[31m-EMBED_ID_RE = re.compile(r"player\.khdiamond\.net/\d+/\d+/([A-Za-z0-9]+)")[m
+[32m+[m[32mEMBED_ID_RE = re.compile(r"player\.kh-diamond\.net/\d+/\d+/([A-Za-z0-9]+)")[m
+ POSTID_RE   = re.compile(r"postid-(\d+)")[m
+ EP_LINK_RE  = re.compile(r'href=["\'](https?://khdiamond\.net/episodes/[^"\']+/)["\']')[m
+ NUM_RE      = re.compile(r"(\d+)\s*-\s*(\d+)")[m
+[1mdiff --git a/user_resolve.py b/user_resolve.py[m
+[1mindex 2387787..2b1d669 100644[m
+[1m--- a/user_resolve.py[m
+[1m+++ b/user_resolve.py[m
+[36m@@ -28,7 +28,7 @@[m [mRETRY_DELAY  = 2.0[m
+ MAX_RETRIES  = 4[m
+ BACKOFF_BASE = 3[m
+ [m
+[31m-EMBED_ID_RE = re.compile(r"player\.khdiamond\.net/\d+/\d+/([A-Za-z0-9]+)")[m
+[32m+[m[32mEMBED_ID_RE = re.compile(r"player\.kh-diamond\.net/\d+/\d+/([A-Za-z0-9]+)")[m
+ POSTID_RE   = re.compile(r"postid-(\d+)")[m
+ EP_LINK_RE  = re.compile(r'href=["\'](https?://khdiamond\.net/episodes/[^"\']+/)["\']')[m
+ NUM_RE      = re.compile(r"(\d+)\s*-\s*(\d+)")[m
+[1mdiff --git a/web_ui.py b/web_ui.py[m
+[1mindex 672f3ca..3dbc0ed 100644[m
+[1m--- a/web_ui.py[m
+[1m+++ b/web_ui.py[m
+[36m@@ -62,6 +62,34 @@[m [mdef save_cookies(d: Path, content: bytes) -> Path:[m
+     cookies_path.write_bytes(content)[m
+     return cookies_path[m
+ [m
+[32m+[m[32mdef login_khdiamond(username: str, password: str, cookies_path: Path) -> tuple[bool, str]:[m
+[32m+[m[32m    """Login to khdiamond.net via AJAX and save session cookies."""[m
+[32m+[m[32m    import urllib.request, urllib.parse[m
+[32m+[m[32m    cookie_jar = MozillaCookieJar(str(cookies_path))[m
+[32m+[m[32m    opener = urllib.request.build_opener(urllib.request.HTTPCookieProcessor(cookie_jar))[m
+[32m+[m[32m    opener.addheaders = [[m
+[32m+[m[32m        ('User-Agent', 'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:120.0) Gecko/20100101 Firefox/120.0'),[m
+[32m+[m[32m        ('Referer', 'https://khdiamond.net/my-account/'),[m
+[32m+[m[32m        ('Content-Type', 'application/x-www-form-urlencoded'),[m
+[32m+[m[32m    ][m
+[32m+[m[32m    data = urllib.parse.urlencode({[m
+[32m+[m[32m        'action': 'dooplay_login',[m
+[32m+[m[32m        'log': username,[m
+[32m+[m[32m        'pwd': password,[m
+[32m+[m[32m        'rmb': 'forever',[m
+[32m+[m[32m        'red': 'https://khdiamond.net/my-account/',[m
+[32m+[m[32m    }).encode()[m
+[32m+[m[32m    try:[m
+[32m+[m[32m        resp = opener.open('https://khdiamond.net/wp-admin/admin-ajax.php', data, timeout=30)[m
+[32m+[m[32m        result = json.loads(resp.read().decode())[m
+[32m+[m[32m        if result.get('response'):[m
+[32m+[m[32m            cookie_jar.save(ignore_discard=True, ignore_expires=True)[m
+[32m+[m[32m            return True, "Login successful"[m
+[32m+[m[32m        return False, result.get('message', 'Login failed')[m
+[32m+[m[32m    except Exception as e:[m
+[32m+[m[32m        return False, str(e)[m
+[32m+[m
+[32m+[m
+ def load_catalog(token: str):[m
+     cat_path = user_dir(token) / "catalog.json"[m
+     if not cat_path.exists():[m
+[36m@@ -210,41 +238,46 @@[m [mdef page(title: str, body: str) -> str:[m
+ # ── Upload Page ───────────────────────────────────────────────────────────────[m
+ UPLOAD_PAGE = page("KhDiamond Setup", """[m
+   <h1>KhDiamond Addon</h1>[m
+[31m-  <p>Provide your khdiamond.net cookies to create your personal Stremio addon.</p>[m
+[31m-  [m
+[32m+[m[32m  <p>Provide your khdiamond.net credentials to get your personal Stremio addon.</p>[m
+   <div class="tabs">[m
+[31m-    <div class="tab active" onclick="switchTab(0)">📋 Paste Cookies</div>[m
+[31m-    <div class="tab" onclick="switchTab(1)">📁 Upload File</div>[m
+[32m+[m[32m    <div class="tab active" onclick="switchTab(0)">🔑 Login</div>[m
+[32m+[m[32m    <div class="tab" onclick="switchTab(1)">📋 Paste Cookies</div>[m
+[32m+[m[32m    <div class="tab" onclick="switchTab(2)">📁 Upload File</div>[m
+   </div>[m
+[31m-[m
+   <div id="tab0">[m
+[32m+[m[32m    <form action="/upload" method="post">[m
+[32m+[m[32m      <input type="hidden" name="method" value="login">[m
+[32m+[m[32m      <input type="text" name="username" placeholder="Email / Username / Phone" required style="width:100%;background:#111;border:1px solid #333;border-radius:8px;color:#eee;padding:12px;font-size:0.95rem;margin-bottom:12px;display:block">[m
+[32m+[m[32m      <input type="password" name="password" placeholder="Password" required style="width:100%;background:#111;border:1px solid #333;border-radius:8px;color:#eee;padding:12px;font-size:0.95rem;margin-bottom:12px;display:block">[m
+[32m+[m[32m      <button type="submit" class="btn">Login & Get Addon URL</button>[m
+[32m+[m[32m    </form>[m
+[32m+[m[32m  </div>[m
+[32m+[m[32m  <div id="tab1" style="display:none">[m
+     <form action="/upload" method="post">[m
+       <input type="hidden" name="method" value="paste">[m
+       <textarea name="cookies_text" placeholder="Paste your full cookies.txt content here..."></textarea>[m
+       <button type="submit" class="btn">Get My Addon URL</button>[m
+     </form>[m
+   </div>[m
+[31m-[m
+[31m-  <div id="tab1" style="display:none">[m
+[32m+[m[32m  <div id="tab2" style="display:none">[m
+     <form action="/upload" method="post" enctype="multipart/form-data">[m
+       <input type="hidden" name="method" value="file">[m
+       <div class="upload-area" onclick="document.getElementById('file').click()">[m
+[31m-        <p>📁 Click to select <strong>cookies.txt</strong></p>[m
+[32m+[m[32m        <p style="margin:0">📁 Click to select <strong>cookies.txt</strong></p>[m
+[32m+[m[32m        <p style="margin:8px 0 0; font-size:0.8rem" id="fname">Netscape format</p>[m
+       </div>[m
+[31m-      <input type="file" id="file" name="cookies" accept=".txt">[m
+[32m+[m[32m      <input type="file" id="file" name="cookies" accept=".txt" onchange="document.getElementById('fname').textContent=this.files[0]?.name||'No file chosen'">[m
+       <button type="submit" class="btn">Get My Addon URL</button>[m
+     </form>[m
+   </div>[m
+[31m-[m
+[32m+[m[32m  <p style="margin-top:18px; font-size:0.8rem">Need help? Use the <a href="https://chrome.google.com/webstore/detail/get-cookiestxt-locally/cclelndahbckbenkjhflpdbgdldlbecc" target="_blank">Get cookies.txt LOCALLY</a> extension.</p>[m
+   <script>[m
+     function switchTab(n) {[m
+[31m-      document.getElementById('tab0').style.display = n === 0 ? 'block' : 'none';[m
+[31m-      document.getElementById('tab1').style.display = n === 1 ? 'block' : 'none';[m
+[32m+[m[32m      [0,1,2].forEach(i => document.getElementById('tab'+i).style.display = i===n ? 'block' : 'none');[m
+       document.querySelectorAll('.tab').forEach((t, i) => t.classList.toggle('active', i === n));[m
+     }[m
+   </script>[m
+ """)[m
+[31m-[m
+ # ── Routes ────────────────────────────────────────────────────────────────────[m
+ @app.get("/", response_class=HTMLResponse)[m
+ async def index():[m
+[36m@@ -255,32 +288,47 @@[m [masync def upload([m
+     request: Request,[m
+     cookies: UploadFile = File(None),[m
+     cookies_text: str = Form(None),[m
+[31m-    method: str = Form("paste")[m
+[32m+[m[32m    method: str = Form("login"),[m
+[32m+[m[32m    username: str = Form(None),[m
+[32m+[m[32m    password: str = Form(None),[m
+ ):[m
+[31m-    content = None[m
+[31m-    if method == "paste" and cookies_text and cookies_text.strip():[m
+[31m-        content = cookies_text.strip().encode("utf-8")[m
+[31m-    elif method == "file" and cookies:[m
+[31m-        content = await cookies.read()[m
+[31m-    else:[m
+[31m-        return HTMLResponse(page("Error", "<h1>No Cookies Provided</h1><a href='/'><button class='btn btn-secondary'>Try Again</button></a>"))[m
+[31m-[m
+     token = str(uuid.uuid4())[:8][m
+     d = user_dir(token)[m
+     d.mkdir(parents=True, exist_ok=True)[m
+[32m+[m[32m    cookies_path = d / "cookies.txt"[m
+ [m
+[31m-    cookies_path = save_cookies(d, content)[m
+[31m-[m
+[31m-    if not validate_cookies(cookies_path):[m
+[31m-        cookies_path.unlink(missing_ok=True)[m
+[32m+[m[32m    if method == "login":[m
+[32m+[m[32m        u = (username or "").strip()[m
+[32m+[m[32m        p = (password or "").strip()[m
+[32m+[m[32m        if not u or not p:[m
+[32m+[m[32m            d.rmdir()[m
+[32m+[m[32m            return HTMLResponse(page("Error", "<h1>Missing Credentials</h1><a href='/'><button class='btn btn-secondary'>Try Again</button></a>"))[m
+[32m+[m[32m        ok, msg = login_khdiamond(u, p, cookies_path)[m
+[32m+[m[32m        if not ok:[m
+[32m+[m[32m            cookies_path.unlink(missing_ok=True)[m
+[32m+[m[32m            d.rmdir()[m
+[32m+[m[32m            return HTMLResponse(page("Login Failed", f"<h1>Login Failed</h1><p>{msg}</p><a href='/'><button class='btn btn-secondary'>Try Again</button></a>"))[m
+[32m+[m[32m    elif method == "paste" and cookies_text and cookies_text.strip():[m
+[32m+[m[32m        cookies_path.write_bytes(cookies_text.strip().encode("utf-8"))[m
+[32m+[m[32m        if not validate_cookies(cookies_path):[m
+[32m+[m[32m            cookies_path.unlink(missing_ok=True)[m
+[32m+[m[32m            d.rmdir()[m
+[32m+[m[32m            return HTMLResponse(page("Error", "<h1>Invalid Cookies</h1><a href='/'><button class='btn btn-secondary'>Try Again</button></a>"))[m
+[32m+[m[32m    elif method == "file" and cookies and cookies.filename:[m
+[32m+[m[32m        cookies_path.write_bytes(await cookies.read())[m
+[32m+[m[32m        if not validate_cookies(cookies_path):[m
+[32m+[m[32m            cookies_path.unlink(missing_ok=True)[m
+[32m+[m[32m            d.rmdir()[m
+[32m+[m[32m            return HTMLResponse(page("Error", "<h1>Invalid Cookies</h1><a href='/'><button class='btn btn-secondary'>Try Again</button></a>"))[m
+[32m+[m[32m    else:[m
+         d.rmdir()[m
+[31m-        return HTMLResponse(page("Error", "<h1>Invalid Cookies</h1><a href='/'><button class='btn btn-secondary'>Try Again</button></a>"))[m
+[32m+[m[32m        return HTMLResponse(page("Error", "<h1>No Credentials Provided</h1><a href='/'><button class='btn btn-secondary'>Try Again</button></a>"))[m
+ [m
+     (d / "meta.json").write_text(json.dumps({[m
+         "token": token,[m
+         "created": datetime.now().isoformat(),[m
+[32m+[m[32m        "source": method,[m
+     }, indent=2))[m
+[31m-[m
+     threading.Thread(target=run_pipeline, args=(token,), daemon=True).start()[m
+     return RedirectResponse(f"/status/{token}", status_code=303)[m
+ [m
+[36m@@ -296,7 +344,7 @@[m [masync def status(token: str):[m
+           <h1>Cookies Expired</h1>[m
+           <span class="status error">Cookies Expired</span>[m
+           <p>Your khdiamond.net cookies have expired. Please export fresh cookies from your browser and re-upload.</p>[m
+[31m-          <a href="/refresh/{token}"><button class="btn">Re-upload Cookies</button></a>[m
+[32m+[m[32m          <a href="/khdiamond-ui/refresh/{token}"><button class="btn">Re-upload Cookies</button></a>[m
+         """))[m
+ [m
+     if st == "not_found":[m
+[36m@@ -319,7 +367,7 @@[m [masync def status(token: str):[m
+       <span class="status ready">{len(catalog)} items</span>[m
+       <div class="url-box">{addon_url}</div>[m
+       <button class="btn" onclick="navigator.clipboard.writeText('{addon_url}')">Copy URL</button>[m
+[31m-      <a href="/refresh/{token}"><button class="btn btn-secondary">Re-upload Cookies</button></a>[m
+[32m+[m[32m      <a href="/khdiamond-ui/refresh/{token}"><button class="btn btn-secondary">Re-upload Cookies</button></a>[m
+     """))[m
+ [m
+ [m
+[36m@@ -375,7 +423,7 @@[m [masync def refresh_upload(token: str, request: Request, cookies: UploadFile = Fil[m
+     (d / "error.txt").unlink(missing_ok=True)[m
+     (d / "expired.txt").unlink(missing_ok=True)[m
+     threading.Thread(target=run_pipeline, args=(token,), daemon=True).start()[m
+[31m-    return RedirectResponse(f"/status/{token}", status_code=303)[m
+[32m+[m[32m    return RedirectResponse(f"/khdiamond-ui/status/{token}", status_code=303)[m
+ [m
+ [m
+ # ── Stremio Endpoints ─────────────────────────────────────────────────────────[m

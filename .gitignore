@@ -38,3 +38,11 @@ worker/.wrangler/
 Thumbs.db
 full_catalog.json
 full_catalog_cache.json
+khdiamond.env
+cookies.txt
+service_account.json
+manual_overrides.json
+full_catalog_cache.json
+__pycache__/
+node_modules/
+scripts/rename_gdrive.py

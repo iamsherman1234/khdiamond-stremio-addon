@@ -32,7 +32,7 @@ RETRY_DELAY  = 2.0
 MAX_RETRIES  = 4
 BACKOFF_BASE = 3
 
-EMBED_ID_RE = re.compile(r"player\.khdiamond\.net/\d+/\d+/([A-Za-z0-9]+)")
+EMBED_ID_RE = re.compile(r"player\.kh-diamond\.net/\d+/\d+/([A-Za-z0-9]+)")
 POSTID_RE   = re.compile(r"postid-(\d+)")
 EP_LINK_RE  = re.compile(r'href=["\'](https?://khdiamond\.net/episodes/[^"\']+/)["\']')
 NUM_RE      = re.compile(r"(\d+)\s*-\s*(\d+)")
