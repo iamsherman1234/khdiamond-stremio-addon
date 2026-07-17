@@ -1,429 +1,512 @@
-# 💎 KhDiamond Stremio Addon
+# KhDiamond Stremio UI
 
-A self-hosted, fully automated Stremio addon ecosystem for Khmer-dubbed movies from [khdiamond.net](https://khdiamond.net). Supports personal use, multi-user deployment, and a public catalog for browsing all available titles.
+A self-hosted Stremio addon for a user's purchased library on
+[khdiamond.net](https://khdiamond.net). The active deployment profile runs the
+FastAPI UI on port `7003`, publishes it through Cloudflare Tunnel, maintains an
+isolated catalog for each user, and renews expired KhDiamond sessions from
+encrypted saved credentials.
 
----
+> This project is intended for access to content owned or authorized by each
+> KhDiamond account. It does not bypass account access controls or purchases.
 
-## 📺 What It Does
+## Features
 
-| Addon | URL | Purpose |
-|---|---|---|
-| Personal Streaming | `https://your-domain/khdiamond/manifest.json` | Stream your purchased movies |
-| Cloudflare Worker | `https://khdiamond.{account}.workers.dev/manifest.json` | Backup/primary streaming endpoint |
-| Multi-User | `https://your-domain/khdiamond-ui/u/{token}/manifest.json` | Per-user personal addon |
-| Catalog | `https://khdiamond-catalog.{account}.workers.dev/manifest.json` | Browse all 400+ KhDiamond titles |
+- Username/password login, pasted cookies, or uploaded Netscape `cookies.txt`
+- Stable per-user Stremio manifest URLs
+- Encrypted credential storage for automatic session renewal
+- Purchase scraping for movies and TV shows
+- Episode expansion and current DooPlay nonce-aware player resolution
+- Movie, series-derived, metadata, search, and stream resources for Stremio
+- Correct parent-series poster lookup, including lazy-loaded poster images
+- Up to 12 stream choices from quality, CDN, and MediaFlow combinations
+- Daily per-user catalog refresh with failure isolation and logging
+- One FastAPI/systemd service; the legacy Node port `7002` is not required
 
----
+## Active architecture
 
-## 🏗️ Architecture
-
-```
-khdiamond.net purchases
-        ↓
-Pipeline (scrape → resolve → sync)
-        ↓
-Google Sheet (personal) / local JSON (per-user)
-        ↓
-catalog.json → Cloudflare KV
-        ↓
-┌─────────────────────────────────────┐
-│  3 Streaming Addon Endpoints        │
-│  • S10+ Node.js (port 7002)         │
-│  • Cloudflare Worker                │
-│  • Per-user FastAPI (port 7003)     │
-└─────────────────────────────────────┘
-        ↓
-Stream Matrix per movie:
-  4K/1080p/720p × CDN1/CDN2 × S10/Cloud
-  = up to 12 stream options
-        ↓
-MediaFlow Proxy (S10+ primary, Render fallback)
-        ↓
-CDN (media-1.khdmcloud.online / khdiamondcdn.asia)
+```mermaid
+flowchart TD
+    Client["Browser or Stremio"] --> Tunnel["Cloudflare Tunnel"]
+    Tunnel --> UI["FastAPI web_ui.py :7003"]
+    UI --> UserDir["users/{token}"]
+    UserDir --> Scrape["user_scrape.py"]
+    Scrape --> Resolve["user_resolve.py"]
+    Resolve --> Sync["user_sync.py"]
+    Sync --> Catalog["catalog.json"]
+    Catalog --> API["Manifest, catalog, meta, stream APIs"]
+    API --> Proxy["MediaFlow proxy"]
+    Proxy --> CDN["KhDiamond HLS CDN"]
 ```
 
----
+The public UI URL in the reference deployment is:
 
-## 📁 Repository Structure
-
-```
-khdiamond-stremio-addon/
-├── index.js                        # Personal S10+ Stremio addon (port 7002)
-├── web_ui.py                       # Multi-user FastAPI web UI (port 7003)
-├── server_scrape.py                # Personal: scrape → Google Sheet
-├── server_resolve.py               # Personal: resolve IDs → Google Sheet
-├── sync_catalog.py                 # Personal: metadata → catalog.json
-├── user_scrape.py                  # Per-user: scrape → local JSON
-├── user_resolve.py                 # Per-user: resolve IDs → local JSON
-├── user_sync.py                    # Per-user: metadata → catalog.json
-├── scrape_full_catalog.py          # Scrape all public khdiamond titles
-├── drive_manager.py                # Google Sheets/Drive auth
-├── update.sh                       # Manual update script (personal)
-├── update_all_users.sh             # Nightly cron for all users
-├── scripts/
-│   ├── upload_catalog_to_kv.py     # Push personal catalog to KV
-│   └── upload_full_catalog_to_kv.py # Push full catalog to KV
-├── docs/
-│   ├── SETUP.md                    # Personal setup guide
-│   ├── MULTI_USER.md               # Multi-user deployment guide
-│   └── ARCHITECTURE.md             # Technical deep dive
-├── cron_env.sh.example             # Environment variables template
-└── .gitignore
+```text
+https://khdiamond-ui.sudolocal.qzz.io
 ```
 
----
+Each account receives a stable manifest URL:
 
-## ⚡ Quick Start
+```text
+https://khdiamond-ui.sudolocal.qzz.io/u/{token}/manifest.json
+```
 
-### Prerequisites
+Only port `7003` is required. `index.js` and port `7002` belong to the legacy
+single-user Node deployment and can remain stopped.
 
-- Ubuntu server (tested on Samsung S10+ via DroidSpaces)
-- Python 3.12+
-- Node.js 18+
-- Cloudflare account (free)
-- Google Cloud service account with Sheets API enabled
-- TMDB API token (free at [themoviedb.org](https://themoviedb.org))
-- MediaFlow proxy instance(s)
-- khdiamond.net account with purchased movies
+## Pipeline
 
-### 1. Clone & Install
+```mermaid
+sequenceDiagram
+    participant U as User or cron
+    participant W as web_ui.py
+    participant K as khdiamond.net
+    participant P as Python pipeline
+    participant C as Per-user catalog
+
+    U->>W: Login, refresh, or scheduled update
+    W->>K: Validate session
+    alt Cookies expired and credentials saved
+        W->>W: Decrypt credentials
+        W->>K: Log in and replace cookies.txt
+    end
+    W->>P: Scrape purchases
+    P->>K: Resolve player IDs with page nonce
+    P->>P: Fetch metadata and series posters
+    P->>C: Write list.json and catalog.json
+    C-->>U: Same manifest URL remains valid
+```
+
+Pipeline stages:
+
+1. `user_scrape.py` loads a user's cookies and extracts purchased movies and
+   TV shows from the account page.
+2. If the session has expired, it uses `khdiamond_credentials.py` to decrypt
+   saved credentials, logs in, replaces the cookie jar, and retries once.
+3. `user_resolve.py` expands TV shows into episodes, obtains each page's
+   current DooPlay nonce, resolves player responses, and stores media IDs.
+4. `user_sync.py` scrapes KhDiamond metadata, enriches it with TMDB data, uses
+   the real parent-series slug for posters, and creates `catalog.json`.
+5. `web_ui.py` serves the catalog through Stremio-compatible HTTP resources.
+
+## Stream matrix
+
+Each title can return up to 12 streams:
+
+| Quality | CDN targets | MediaFlow targets | Maximum |
+|---|---:|---:|---:|
+| 2160p, when available | 2 | 2 | 4 |
+| 1080p | 2 | 2 | 4 |
+| 720p | 2 | 2 | 4 |
+
+The addon returns stream URLs but does not proxy video bytes itself. Playback
+travels through a configured MediaFlow instance to a KhDiamond HLS CDN.
+
+## Repository layout
+
+| Path | Purpose |
+|---|---|
+| `web_ui.py` | FastAPI setup UI and Stremio HTTP API on port `7003` |
+| `khdiamond_http.py` | Shared HTML, nonce, post-ID, response, and media-ID parsing |
+| `khdiamond_credentials.py` | Fernet encryption and automatic KhDiamond login |
+| `user_scrape.py` | Per-user purchased-library scraper |
+| `user_resolve.py` | Episode expansion and player/media-ID resolver |
+| `user_sync.py` | Metadata, poster, TMDB, and catalog generator |
+| `daily_update.sh` | Locked daily entrypoint for UI-only updates |
+| `update_all_users.sh` | Refreshes every valid directory under `users/` |
+| `test_khdiamond_http.py` | Scraping and player-response regression tests |
+| `test_khdiamond_credentials.py` | Credential encryption and permission tests |
+| `index.js` | Optional legacy single-user Node addon on port `7002` |
+| `server_*.py`, `sync_catalog.py` | Optional legacy Google Sheets pipeline |
+| `scrape_full_catalog.py` | Optional public-catalog pipeline; not used by UI-only mode |
+
+## Per-user storage
+
+Each account is isolated under `/root/khdiamond/users/{token}/`:
+
+| File | Contents |
+|---|---|
+| `cookies.txt` | Netscape cookie jar used for authenticated requests |
+| `credentials.enc` | Fernet-encrypted username and password, login mode only |
+| `library_raw.json` | Purchased movies and parent TV shows |
+| `list.json` | Resolved media IDs and parent-series slugs |
+| `catalog.json` | Final data served to Stremio |
+| `meta_cache.json` | Metadata cache keyed by media ID |
+| `pipeline.log` | Interactive pipeline output |
+| `running.txt` | Build-in-progress marker |
+| `error.txt` | Pipeline failure marker |
+| `expired.txt` | Authentication renewal failure marker |
+
+The encryption master key is stored outside user directories at
+`/root/khdiamond/credential.key` by default.
+
+## Requirements
+
+- Linux server with Python 3.12+
+- `python3-venv`, `flock`, systemd, and Cloudflared
+- A TMDB API bearer token for metadata enrichment
+- One or two MediaFlow instances
+- A KhDiamond account with authorized purchases
+- DNS hostname routed to a Cloudflare Tunnel
+
+The port-7003 profile does not require Node.js, PM2, Google Sheets, or a
+Cloudflare Worker.
+
+## Installation
+
+### 1. Clone and create a virtual environment
 
 ```bash
-git clone https://github.com/YOUR_USERNAME/khdiamond-stremio-addon.git /root/khdiamond
+git clone https://github.com/iamsherman1234/khdiamond-stremio-addon.git /root/khdiamond
 cd /root/khdiamond
 
-# Python dependencies
-pip3 install requests beautifulsoup4 pandas gspread google-auth \
-             google-auth-oauthlib google-api-python-client \
-             fastapi uvicorn python-multipart --break-system-packages
-
-# Node.js dependencies
-npm install
+apt-get update
+apt-get install -y python3-venv
+python3 -m venv .venv
+.venv/bin/pip install --upgrade pip
+.venv/bin/pip install -r requirements.txt
 ```
 
-### 2. Configure Environment
+Using a virtual environment avoids Debian/Ubuntu's PEP 668
+`externally-managed-environment` error.
 
-```bash
-cp cron_env.sh.example cron_env.sh
-nano cron_env.sh
+### 2. Configure the systemd environment
+
+Create `/root/khdiamond/khdiamond.env`:
+
+```dotenv
+KH_DIAMOND_UI_BASE=https://khdiamond-ui.example.com
+KH_DIAMOND_CREDENTIAL_KEY_FILE=/root/khdiamond/credential.key
+TMDB_ACCESS_TOKEN=replace_with_tmdb_bearer_token
+MEDIAFLOW_URL=https://mediaflow-primary.example.com
+MEDIAFLOW_URL2=https://mediaflow-fallback.example.com
+MEDIAFLOW_PASSWORD=replace_with_mediaflow_password
 ```
 
-Fill in all values:
+Protect it:
 
 ```bash
-export GDRIVE_SERVICE_ACCOUNT='{"type":"service_account",...}'  # paste full JSON on one line
-export TMDB_ACCESS_TOKEN="your_tmdb_bearer_token"
-export MEDIAFLOW_URL="https://your-domain/mediaflow-py"
-export MEDIAFLOW_URL2="https://your-fallback.onrender.com"
-export MEDIAFLOW_PASSWORD="your_password"
-export CLOUDFLARE_API_TOKEN="your_cf_token"
-export CF_ACCOUNT_ID="your_cf_account_id"
-export CF_KV_NAMESPACE="your_streaming_catalog_kv_namespace_id"
-export CF_FULL_CATALOG_KV_NAMESPACE="your_full_catalog_kv_namespace_id"
-export ADDON_URL="https://your-domain/khdiamond"
-export COOKIES_PATH="/root/khdiamond/cookies.txt"
+chmod 600 /root/khdiamond/khdiamond.env
 ```
 
-Also create `khdiamond.env` (same content, no `export` prefix) for systemd:
+Do not put quotes around values unless the quote characters are part of the
+actual value. A systemd `EnvironmentFile` also does not use `export`.
 
-```bash
-grep "^export" cron_env.sh | sed 's/^export //' > khdiamond.env
-# Then manually fix GDRIVE_SERVICE_ACCOUNT to be on a single line
-```
+### 3. Install the UI service
 
-### 3. Export Cookies from Browser
+Create `/etc/systemd/system/khdiamond-ui.service`:
 
-1. Install [Get cookies.txt](https://chrome.google.com/webstore/detail/get-cookiestxt-locally/cclelndahbckbenkjhflpdbgdldlbecc) Chrome extension
-2. Log into [khdiamond.net](https://khdiamond.net)
-3. Click the extension → export `cookies.txt` (Netscape format)
-4. Upload to server:
-
-```bash
-scp -P YOUR_PORT cookies.txt root@YOUR_SERVER:/root/khdiamond/cookies.txt
-```
-
-### 4. Set Up Cloudflare Worker
-
-```bash
-cd /root/khdiamond-worker  # separate repo: khdiamond-stremio-worker
-npm install
-wrangler login
-wrangler kv namespace create CATALOG
-# Note the namespace ID, update wrangler.toml
-wrangler secret put MEDIAFLOW_PASSWORD
-wrangler deploy
-```
-
-### 5. Run First Sync
-
-```bash
-source cron_env.sh
-python3 server_scrape.py
-python3 server_resolve.py
-python3 sync_catalog.py
-
-# Upload to Cloudflare KV
-python3 scripts/upload_catalog_to_kv.py
-```
-
-### 6. Start Addon Servers
-
-**Personal streaming addon (pm2):**
-```bash
-pm2 start index.js --name khdiamond --cwd /root/khdiamond
-pm2 save
-```
-
-**Multi-user web UI (systemd):**
-```bash
-cat > /etc/systemd/system/khdiamond-ui.service << 'EOF'
+```ini
 [Unit]
-Description=KhDiamond Multi-User Addon UI
-After=network.target
+Description=KhDiamond Multi-User Stremio Addon
+After=network-online.target
+Wants=network-online.target
 
 [Service]
 Type=simple
 User=root
 WorkingDirectory=/root/khdiamond
 EnvironmentFile=/root/khdiamond/khdiamond.env
-ExecStart=/usr/bin/python3 /root/khdiamond/web_ui.py
+Environment="PATH=/root/khdiamond/.venv/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin"
+ExecStart=/root/khdiamond/.venv/bin/python /root/khdiamond/web_ui.py
 Restart=always
 RestartSec=5
 
 [Install]
 WantedBy=multi-user.target
-EOF
+```
 
+Enable it:
+
+```bash
 systemctl daemon-reload
-systemctl enable khdiamond-ui
-systemctl start khdiamond-ui
+systemctl enable --now khdiamond-ui
+systemctl is-active khdiamond-ui
+curl -fsS -o /dev/null -w 'HTTP %{http_code}\n' http://127.0.0.1:7003/
 ```
 
-### 7. Configure Nginx
+Expected result: `active` and `HTTP 200`.
 
-```nginx
-location /khdiamond/ {
-    proxy_pass http://127.0.0.1:7002/;
-    proxy_set_header Host $host;
-    proxy_set_header X-Real-IP $remote_addr;
-    proxy_set_header X-Forwarded-Proto $scheme;
-    proxy_http_version 1.1;
-}
+### 4. Configure Cloudflare Tunnel
 
-location /khdiamond-ui/ {
-    proxy_pass http://127.0.0.1:7003/;
-    proxy_set_header Host $host;
-    proxy_set_header X-Real-IP $remote_addr;
-    proxy_set_header X-Forwarded-Proto $scheme;
-    proxy_http_version 1.1;
-}
+Add an ingress rule to the configuration used by the Cloudflared systemd
+service:
+
+```yaml
+ingress:
+  - hostname: khdiamond-ui.example.com
+    service: http://localhost:7003
+  - service: http_status:404
 ```
+
+The catch-all `http_status:404` rule must remain last. Validate the same file
+that systemd loads:
 
 ```bash
-nginx -t && systemctl reload nginx
+systemctl cat cloudflared | grep ExecStart
+cloudflared tunnel --config /etc/cloudflared/config.yml ingress validate
+systemctl restart cloudflared
+curl -fsS -o /dev/null -w 'HTTP %{http_code}\n' https://khdiamond-ui.example.com/
 ```
 
-### 8. Create Manual Update Command
+Backup hostnames may point to the same port by adding more hostname/service
+pairs before the catch-all rule.
+
+### 5. Create the cron environment
+
+Create `/root/khdiamond/cron_env.sh` with the variables needed by the metadata
+and stream pipeline:
 
 ```bash
-cat > /usr/local/bin/khdupdate << 'EOF'
-#!/bin/bash
-nohup /root/khdiamond/update.sh >> /var/log/khdiamond_update.log 2>&1 &
-echo "✓ KhDiamond update started in background (PID $!)"
-echo "  Monitor: tail -f /var/log/khdiamond_update.log"
-EOF
-chmod +x /usr/local/bin/khdupdate
+export TMDB_ACCESS_TOKEN='replace_with_tmdb_bearer_token'
+export MEDIAFLOW_URL='https://mediaflow-primary.example.com'
+export MEDIAFLOW_URL2='https://mediaflow-fallback.example.com'
+export MEDIAFLOW_PASSWORD='replace_with_mediaflow_password'
+export KH_DIAMOND_CREDENTIAL_KEY_FILE='/root/khdiamond/credential.key'
 ```
 
-### 9. Set Up Cron
+Protect it and install the daily schedule:
 
 ```bash
+chmod 600 /root/khdiamond/cron_env.sh
+chmod +x /root/khdiamond/daily_update.sh /root/khdiamond/update_all_users.sh
 crontab -e
 ```
 
-```
-0 0 * * *  source /root/khdiamond/cron_env.sh && python3 /root/khdiamond/server_scrape.py >> /var/log/khdiamond_scrape.log 2>&1
-30 0 * * * source /root/khdiamond/cron_env.sh && python3 /root/khdiamond/server_resolve.py >> /var/log/khdiamond_resolve.log 2>&1
-0 1 * * *  source /root/khdiamond/cron_env.sh && python3 /root/khdiamond/sync_catalog.py >> /var/log/khdiamond_sync.log 2>&1 && python3 /root/khdiamond/scripts/upload_catalog_to_kv.py >> /var/log/khdiamond_sync.log 2>&1
-0 2 * * *  /root/khdiamond/update_all_users.sh
-0 3 * * 0  source /root/khdiamond/cron_env.sh && python3 /root/khdiamond/scrape_full_catalog.py >> /var/log/khdiamond_fullcat.log 2>&1 && python3 /root/khdiamond/scripts/upload_full_catalog_to_kv.py >> /var/log/khdiamond_fullcat.log 2>&1
+Add:
+
+```cron
+0 0 * * * /root/khdiamond/daily_update.sh
 ```
 
-### 10. Install in Stremio
+This runs at midnight in the server's local timezone. `daily_update.sh` uses
+`flock` so a second scheduled run cannot overlap the first.
 
-Install both addons for the best experience:
+## Creating an addon
 
-**Streaming addon** (your purchased movies):
+1. Visit `https://khdiamond-ui.example.com/`.
+2. Choose **Login**, **Paste Cookies**, or **Upload File**.
+3. Login mode encrypts and stores the credentials for automatic renewal.
+4. Wait for scrape, resolution, and metadata synchronization to finish.
+5. Copy the generated `/u/{token}/manifest.json` URL into Stremio.
+
+Typical build time is 5–10 minutes, depending on library size and remote API
+latency. The status page refreshes while the pipeline is running.
+
+## Automatic authentication renewal
+
+```mermaid
+stateDiagram-v2
+    [*] --> CheckSession
+    CheckSession --> Scrape: Cookies valid
+    CheckSession --> Decrypt: Login page detected
+    Decrypt --> Login: Credentials available
+    Login --> SaveCookies: Login accepted
+    SaveCookies --> Scrape
+    Login --> Expired: Password rejected or site changed
+    Decrypt --> Expired: Credentials unavailable
+    Scrape --> Resolve
+    Resolve --> Sync
+    Sync --> Ready
 ```
-https://khdiamond.YOUR_ACCOUNT.workers.dev/manifest.json
-```
 
-**Catalog addon** (browse all 400+ KhDiamond titles):
-```
-https://khdiamond-catalog.YOUR_ACCOUNT.workers.dev/manifest.json
-```
+For accounts created or refreshed with username/password:
 
-> When both are installed, clicking any movie from the catalog will automatically show your KhDiamond streams if you own it.
+- `credentials.enc` contains the encrypted login.
+- `credential.key` is generated once with mode `600`.
+- On expiration, `user_scrape.py` decrypts, logs in, saves fresh cookies, and
+  retries the account request.
+- The token and installed Stremio URL do not change.
+- If renewal fails, `expired.txt` is written and the refresh page requests new
+  credentials. Scheduled updates keep the previous working catalog.
 
----
+Accounts created from pasted/uploaded cookies do not have saved credentials
+and therefore require manual cookie replacement after expiration.
 
-## 👥 Multi-User Setup
+### Security limitations
 
-Users can get their own personal addon by:
+Encryption protects credentials from accidental disclosure and prevents the
+password from appearing directly in backups or directory listings. Because
+the application and encryption key are on the same server, a root compromise
+can decrypt every stored account. Use full-disk encryption, restrict SSH, keep
+the system patched, and do not expose server administration services publicly.
 
-1. Visiting `https://your-domain/khdiamond-ui/`
-2. Uploading their `cookies.txt` from khdiamond.net
-3. Waiting ~5 minutes for the catalog to build
-4. Installing the generated addon URL in Stremio
+Back up `credential.key` securely. Losing it makes every `credentials.enc`
+file unrecoverable. Never commit the key, user directories, environment files,
+cookies, archives, or logs.
 
-Each user gets a unique token and isolated catalog. Nightly cron refreshes all users automatically.
+## Stremio API
 
-**Admin commands:**
+For a token named `{token}`:
+
+| Resource | Path |
+|---|---|
+| Manifest | `/u/{token}/manifest.json` |
+| Movie catalog | `/u/{token}/catalog/movie/khdiamond_movies_{token}.json` |
+| Series catalog | `/u/{token}/catalog/series/khdiamond_series_{token}.json` |
+| Metadata | `/u/{token}/meta/{type}/{id}.json` |
+| Streams | `/u/{token}/stream/{type}/{id}.json` |
+
+Responses include permissive CORS headers because Stremio clients must access
+the addon remotely. A token acts like an unlisted URL; do not post manifest
+URLs publicly.
+
+## Operations
+
+### Service health
+
 ```bash
-# Check all users
-ls /root/khdiamond/users/
+systemctl is-active khdiamond-ui cloudflared
+ss -ltnp | grep ':7003'
+curl -fsS -o /dev/null -w 'HTTP %{http_code}\n' \
+  https://khdiamond-ui.example.com/
+```
 
-# View a user's pipeline log
+`curl -I` sends `HEAD`, which the root FastAPI route does not implement and may
+return HTTP 405. Use the normal GET-based command above.
+
+### Pipeline monitoring
+
+```bash
+pgrep -af 'user_(scrape|resolve|sync)\.py'
 tail -f /root/khdiamond/users/{token}/pipeline.log
-
-# Manually re-run for a user
-source /root/khdiamond/cron_env.sh
-USER_TOKEN={token} \
-USER_DIR=/root/khdiamond/users/{token} \
-COOKIES_PATH=/root/khdiamond/users/{token}/cookies.txt \
-CATALOG_PATH=/root/khdiamond/users/{token}/catalog.json \
-python3 /root/khdiamond/user_scrape.py
+journalctl -u khdiamond-ui -n 100 --no-pager
 ```
 
----
-
-## 🔄 Stream Matrix
-
-Each movie provides up to 12 stream options:
-
-```
-Quality  │ CDN  │ Proxy  
-─────────┼──────┼────────
-4K       │ CDN1 │ S10    
-4K       │ CDN1 │ Cloud  
-4K       │ CDN2 │ S10    
-4K       │ CDN2 │ Cloud  
-1080p    │ CDN1 │ S10    
-1080p    │ CDN1 │ Cloud  
-1080p    │ CDN2 │ S10    
-1080p    │ CDN2 │ Cloud  
-720p     │ CDN1 │ S10    
-720p     │ CDN1 │ Cloud  
-720p     │ CDN2 │ S10    
-720p     │ CDN2 │ Cloud  
-```
-
-4K streams only appear when available on khdiamond.net.
-
----
-
-## 🗄️ Cron Schedule
-
-| Time | Script | Purpose |
-|---|---|---|
-| 12:00 AM daily | `server_scrape.py` | Scrape personal purchases |
-| 12:30 AM daily | `server_resolve.py` | Resolve movie IDs |
-| 1:00 AM daily | `sync_catalog.py` + KV upload | Update personal catalog |
-| 2:00 AM daily | `update_all_users.sh` | Refresh all user catalogs |
-| 3:00 AM Sunday | `scrape_full_catalog.py` + KV upload | Update public catalog addon |
-
----
-
-## 🛠️ Manual Commands
+### Scheduled-update logs
 
 ```bash
-# Update personal catalog (runs in background)
-khdupdate
-
-# Monitor update progress
-tail -f /var/log/khdiamond_update.log
-
-# Check service status
-pm2 status
-systemctl status khdiamond-ui
-
-# View logs
-pm2 logs khdiamond --lines 50
-journalctl -u khdiamond-ui -n 50
+tail -n 100 /var/log/khdiamond_daily.log
+tail -n 100 /var/log/khdiamond_users.log
 ```
 
----
+### Manual update for all users
 
-## 🔧 Environment Variables
+```bash
+/root/khdiamond/daily_update.sh
+```
 
-| Variable | Purpose | Required |
-|---|---|---|
-| `GDRIVE_SERVICE_ACCOUNT` | Google service account JSON (single line) | Personal pipeline |
-| `TMDB_ACCESS_TOKEN` | TMDB API bearer token | Metadata sync |
-| `MEDIAFLOW_URL` | Primary MediaFlow proxy URL | Streaming |
-| `MEDIAFLOW_URL2` | Fallback MediaFlow proxy URL | Streaming fallback |
-| `MEDIAFLOW_PASSWORD` | MediaFlow API password | Streaming |
-| `CLOUDFLARE_API_TOKEN` | Cloudflare API token | KV upload |
-| `CF_ACCOUNT_ID` | Cloudflare account ID | KV upload |
-| `CF_KV_NAMESPACE` | Streaming catalog KV namespace ID | KV upload |
-| `CF_FULL_CATALOG_KV_NAMESPACE` | Public full catalog KV namespace ID | Full catalog KV upload |
-| `ADDON_URL` | Public URL of the S10+ addon | Addon manifest |
-| `COOKIES_PATH` | Path to khdiamond.net cookies.txt | Scraper |
+### Manual update for one user
 
----
+```bash
+cd /root/khdiamond
+source cron_env.sh
+export USER_TOKEN='{token}'
+export USER_DIR="/root/khdiamond/users/$USER_TOKEN"
+export COOKIES_PATH="$USER_DIR/cookies.txt"
+export CATALOG_PATH="$USER_DIR/catalog.json"
 
-## 🚨 Troubleshooting
+python3 user_scrape.py &&
+python3 user_resolve.py &&
+python3 user_sync.py
+```
+
+The `&&` operators prevent later stages from running against stale input after
+an earlier failure.
+
+### Removing a user
+
+Stop any pipeline for the exact token, verify the directory, and then remove
+only that user's directory. This permanently removes its cookies, encrypted
+credentials, catalog, cache, and logs. Never use a wildcard against
+`/root/khdiamond/users` for administrative deletion.
+
+## Verification
+
+Run the local regression and syntax checks:
+
+```bash
+cd /root/khdiamond
+python3 -m unittest -v test_khdiamond_http.py test_khdiamond_credentials.py
+python3 -m py_compile \
+  khdiamond_http.py khdiamond_credentials.py \
+  user_scrape.py user_resolve.py user_sync.py web_ui.py
+bash -n daily_update.sh update_all_users.sh
+```
+
+Verify a deployed catalog:
+
+```bash
+TOKEN='{token}'
+BASE='https://khdiamond-ui.example.com'
+
+curl -fsS -o /dev/null -w 'Manifest HTTP %{http_code}\n' \
+  "$BASE/u/$TOKEN/manifest.json"
+
+curl -fsS "$BASE/u/$TOKEN/catalog/movie/khdiamond_movies_$TOKEN.json" |
+  python3 -c 'import json,sys; print("Movies:", len(json.load(sys.stdin).get("metas", [])))'
+
+curl -fsS "$BASE/u/$TOKEN/catalog/series/khdiamond_series_$TOKEN.json" |
+  python3 -c 'import json,sys; x=json.load(sys.stdin).get("metas", []); print("Series posters: {}/{}".format(sum(bool(i.get("poster")) for i in x), len(x)))'
+```
+
+## Troubleshooting
+
+### Status page stays on Building
+
+```bash
+pgrep -af 'user_(scrape|resolve|sync)\.py'
+tail -n 50 /root/khdiamond/users/{token}/pipeline.log
+find /root/khdiamond/users/{token} -maxdepth 1 -type f -printf '%f\n'
+```
+
+`running.txt` without a matching process indicates an interrupted build. Read
+the pipeline log before removing stale state or starting another pipeline.
+
+### HTTP 400 from the player endpoint
+
+The current DooPlay endpoint requires the per-page nonce. Confirm the deployed
+`user_resolve.py` imports `extract_nonce` from `khdiamond_http.py`. Repeated
+HTTP 400 responses can also mean the KhDiamond session is invalid.
 
 ### Cookies expired
-```bash
-# Export fresh cookies, then:
-scp -P PORT cookies.txt root@SERVER:/root/khdiamond/cookies.txt
-khdupdate
+
+For login-mode users, look for `Session expired — attempting encrypted
+automatic login` in the pipeline log. If renewal fails, visit:
+
+```text
+https://khdiamond-ui.example.com/refresh/{token}
 ```
 
-### Streams not showing in Stremio
+Enter the current username/password to replace both encrypted credentials and
+cookies while preserving the same token.
+
+### Series posters are blank
+
+Confirm `list.json` preserves a non-empty `series` field for episode rows and
+that the public series catalog reports poster URLs. If an old cache predates
+the fix, move `meta_cache.json` aside and run the resolver and sync again.
+
+### Catalog works but Stremio still shows old metadata
+
+Verify the public API first. If poster URLs are present there, restart Stremio
+or remove and reinstall the addon to clear client-side cached metadata.
+
+### Port or tunnel errors
+
 ```bash
-# Test stream endpoint directly
-curl "https://khdiamond.YOUR_ACCOUNT.workers.dev/stream/movie/tt0478970.json"
-# Should return 12 streams for Ant-Man (tt0478970)
+systemctl is-active khdiamond-ui cloudflared
+ss -ltnp | grep ':7003'
+cloudflared tunnel --config /etc/cloudflared/config.yml ingress validate
 ```
 
-### Catalog not updating
-```bash
-source /root/khdiamond/cron_env.sh
-python3 /root/khdiamond/sync_catalog.py
-python3 /root/khdiamond/scripts/upload_catalog_to_kv.py
-```
+Validate the configuration path shown in Cloudflared's systemd `ExecStart`,
+not an unused configuration under another directory.
 
-### Multi-user pipeline failed
-```bash
-# Check error
-cat /root/khdiamond/users/{token}/error.txt
-cat /root/khdiamond/users/{token}/pipeline.log
-```
+## Optional legacy components
 
-### KV upload out of memory (S10+)
-```bash
-# Use curl instead of wrangler
-source /root/khdiamond/cron_env.sh
-curl -X PUT "https://api.cloudflare.com/client/v4/accounts/${CF_ACCOUNT_ID}/storage/kv/namespaces/YOUR_NAMESPACE_ID/values/catalog.json" \
-  -H "Authorization: Bearer ${CLOUDFLARE_API_TOKEN}" \
-  -H "Content-Type: application/json" \
-  --data-binary @/root/khdiamond/catalog.json
-```
+The repository retains code for earlier deployments:
 
----
+- `index.js` serves a local JSON catalog on port `7002`.
+- `server_scrape.py`, `server_resolve.py`, and `sync_catalog.py` use Google
+  Sheets for a single-user pipeline.
+- `khdiamond-worker` can provide a Cloudflare Worker streaming endpoint.
+- `khdiamond-catalog-worker` can provide a separate public full catalog.
 
-## 🔐 Security Notes
+They are not started, routed, or updated by the UI-only deployment described
+here. Their directories may remain as inactive backups.
 
-- Never commit `cron_env.sh`, `khdiamond.env`, `cookies.txt`, or `service_account.json`
-- The `.gitignore` excludes all sensitive files automatically
-- MediaFlow password protects streams from unauthorized access
-- Per-user tokens are 8-character UUIDs
-- All Stremio addon endpoints must be public (Stremio requirement)
+## License and responsibility
 
----
-
-## 📝 License
-
-Private repository — not for public distribution.
+Use this software only with accounts and media you are authorized to access.
+The operator is responsible for securing credentials, complying with
+KhDiamond's terms, and controlling access to the deployed addon.
