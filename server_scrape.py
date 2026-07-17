@@ -14,6 +14,7 @@ from http.cookiejar import MozillaCookieJar
 import requests
 import pandas as pd
 from bs4 import BeautifulSoup
+from khdiamond_http import is_login_page, library_rows
 
 sys.path.insert(0, "/root/khdiamond")
 from drive_manager import get_gspread_client
@@ -40,38 +41,10 @@ def main():
     r.raise_for_status()
     html = r.text
     print(f"  ← {len(html):,} bytes")
-    if len(html) < 20_000 or "<h1>Log in</h1>" in html:
+    if is_login_page(r):
         sys.exit("❌ Got login page — cookies expired. Re-export and update cookies.txt.")
 
-    soup = BeautifulSoup(html, "html.parser")
-    path_re = re.compile(r"/(movies|tvshows|series|tvshow|episode)/([^/]+)/?")
-
-    rows = []
-    for art in soup.find_all("article"):
-        h3 = art.find("h3")
-        if not h3:
-            continue
-        link = h3.find("a", href=True)
-        if not link:
-            continue
-        m = path_re.search(link["href"])
-        if not m:
-            continue
-        kind, slug = m.group(1), m.group(2)
-
-        year = ""
-        data_div = art.find("div", class_="data")
-        if data_div and (y := data_div.find("span")):
-            year = y.get_text(strip=True)
-
-        rows.append({
-            "slug":       slug,
-            "title":      link.get_text(strip=True),
-            "kind":       kind,
-            "year":       year,
-            "page_url":   link["href"],
-            "article_id": art.get("id", ""),
-        })
+    rows = library_rows(html, r.url)
 
     df = pd.DataFrame(rows).drop_duplicates(subset=["slug", "kind"])
 
