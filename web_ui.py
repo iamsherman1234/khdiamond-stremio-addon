@@ -16,6 +16,9 @@ from http.cookiejar import MozillaCookieJar
 from fastapi import FastAPI, File, UploadFile, Form, Request
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 import uvicorn
+from khdiamond_credentials import (delete_credentials,
+                                    login_khdiamond as credential_login,
+                                    save_credentials)
 
 # ── Config ────────────────────────────────────────────────────────────────────
 BASE_DIR = Path("/root/khdiamond")
@@ -61,34 +64,6 @@ def save_cookies(d: Path, content: bytes) -> Path:
     cookies_path = d / "cookies.txt"
     cookies_path.write_bytes(content)
     return cookies_path
-
-def login_khdiamond(username: str, password: str, cookies_path: Path) -> tuple[bool, str]:
-    """Login to khdiamond.net via AJAX and save session cookies."""
-    import urllib.request, urllib.parse
-    cookie_jar = MozillaCookieJar(str(cookies_path))
-    opener = urllib.request.build_opener(urllib.request.HTTPCookieProcessor(cookie_jar))
-    opener.addheaders = [
-        ('User-Agent', 'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:120.0) Gecko/20100101 Firefox/120.0'),
-        ('Referer', 'https://khdiamond.net/my-account/'),
-        ('Content-Type', 'application/x-www-form-urlencoded'),
-    ]
-    data = urllib.parse.urlencode({
-        'action': 'dooplay_login',
-        'log': username,
-        'pwd': password,
-        'rmb': 'forever',
-        'red': 'https://khdiamond.net/my-account/',
-    }).encode()
-    try:
-        resp = opener.open('https://khdiamond.net/wp-admin/admin-ajax.php', data, timeout=30)
-        result = json.loads(resp.read().decode())
-        if result.get('response'):
-            cookie_jar.save(ignore_discard=True, ignore_expires=True)
-            return True, "Login successful"
-        return False, result.get('message', 'Login failed')
-    except Exception as e:
-        return False, str(e)
-
 
 def load_catalog(token: str):
     cat_path = user_dir(token) / "catalog.json"
@@ -303,11 +278,12 @@ async def upload(
         if not u or not p:
             d.rmdir()
             return HTMLResponse(page("Error", "<h1>Missing Credentials</h1><a href='/'><button class='btn btn-secondary'>Try Again</button></a>"))
-        ok, msg = login_khdiamond(u, p, cookies_path)
+        ok, msg = credential_login(u, p, cookies_path)
         if not ok:
             cookies_path.unlink(missing_ok=True)
             d.rmdir()
             return HTMLResponse(page("Login Failed", f"<h1>Login Failed</h1><p>{msg}</p><a href='/'><button class='btn btn-secondary'>Try Again</button></a>"))
+        save_credentials(d, u, p)
     elif method == "paste" and cookies_text and cookies_text.strip():
         cookies_path.write_bytes(cookies_text.strip().encode("utf-8"))
         if not validate_cookies(cookies_path):
@@ -343,8 +319,8 @@ async def status(token: str):
         return HTMLResponse(page("Cookies Expired", f"""
           <h1>Cookies Expired</h1>
           <span class="status error">Cookies Expired</span>
-          <p>Your khdiamond.net cookies have expired. Please export fresh cookies from your browser and re-upload.</p>
-          <a href="/refresh/{token}"><button class="btn">Re-upload Cookies</button></a>
+          <p>Automatic login failed. Log in again or provide fresh cookies.</p>
+          <a href="/refresh/{token}"><button class="btn">Renew Session</button></a>
         """))
 
     if st == "not_found":
@@ -376,19 +352,28 @@ async def refresh_page(token: str):
     if user_status(token) == "not_found":
         return RedirectResponse("/")
     return HTMLResponse(page("Refresh", f"""
-      <h1>Re-upload Cookies</h1>
+      <h1>Renew KhDiamond Session</h1>
       <div class="tabs">
-        <div class="tab active" onclick="switchTab(0)">📋 Paste</div>
-        <div class="tab" onclick="switchTab(1)">📁 File</div>
+        <div class="tab active" onclick="switchTab(0)">🔑 Login</div>
+        <div class="tab" onclick="switchTab(1)">📋 Paste</div>
+        <div class="tab" onclick="switchTab(2)">📁 File</div>
       </div>
       <div id="tab0">
+        <form action="/refresh/{token}" method="post">
+          <input type="hidden" name="method" value="login">
+          <input type="text" name="username" placeholder="Email / Username / Phone" required style="width:100%;background:#111;border:1px solid #333;border-radius:8px;color:#eee;padding:12px;font-size:0.95rem;margin-bottom:12px;display:block">
+          <input type="password" name="password" placeholder="Password" required style="width:100%;background:#111;border:1px solid #333;border-radius:8px;color:#eee;padding:12px;font-size:0.95rem;margin-bottom:12px;display:block">
+          <button type="submit" class="btn">Login, Save & Refresh</button>
+        </form>
+      </div>
+      <div id="tab1" style="display:none">
         <form action="/refresh/{token}" method="post">
           <input type="hidden" name="method" value="paste">
           <textarea name="cookies_text" placeholder="Paste new cookies..."></textarea>
           <button type="submit" class="btn">Refresh</button>
         </form>
       </div>
-      <div id="tab1" style="display:none">
+      <div id="tab2" style="display:none">
         <form action="/refresh/{token}" method="post" enctype="multipart/form-data">
           <input type="hidden" name="method" value="file">
           <div class="upload-area" onclick="document.getElementById('f').click()">Click to upload cookies.txt</div>
@@ -396,28 +381,44 @@ async def refresh_page(token: str):
           <button type="submit" class="btn">Refresh</button>
         </form>
       </div>
-      <script>function switchTab(n){{document.getElementById('tab0').style.display=n===0?'block':'none';document.getElementById('tab1').style.display=n===1?'block':'none';}}</script>
+      <script>function switchTab(n){{[0,1,2].forEach(i => document.getElementById('tab'+i).style.display=i===n?'block':'none');document.querySelectorAll('.tab').forEach((t,i)=>t.classList.toggle('active',i===n));}}</script>
     """))
 
 
 @app.post("/refresh/{token}", response_class=HTMLResponse)
-async def refresh_upload(token: str, request: Request, cookies: UploadFile = File(None), cookies_text: str = Form(None), method: str = Form("paste")):
+async def refresh_upload(token: str, request: Request,
+                         cookies: UploadFile = File(None),
+                         cookies_text: str = Form(None),
+                         method: str = Form("login"),
+                         username: str = Form(None),
+                         password: str = Form(None)):
     if user_status(token) == "not_found":
         return RedirectResponse("/")
 
+    d = user_dir(token)
+    cookies_path = d / "cookies.txt"
     content = None
-    if method == "paste" and cookies_text and cookies_text.strip():
+    if method == "login":
+        u = (username or "").strip()
+        p = password or ""
+        if not u or not p:
+            return HTMLResponse(page("Error", f"<h1>Missing Credentials</h1><a href='/refresh/{token}'><button class='btn btn-secondary'>Try Again</button></a>"))
+        ok, msg = credential_login(u, p, cookies_path)
+        if not ok:
+            return HTMLResponse(page("Login Failed", f"<h1>Login Failed</h1><p>{msg}</p><a href='/refresh/{token}'><button class='btn btn-secondary'>Try Again</button></a>"))
+        save_credentials(d, u, p)
+    elif method == "paste" and cookies_text and cookies_text.strip():
         content = cookies_text.strip().encode("utf-8")
     elif method == "file" and cookies:
         content = await cookies.read()
-    else:
+    elif method != "login":
         return HTMLResponse(page("Error", f"<h1>No Cookies Provided</h1><a href='/refresh/{token}'><button class='btn btn-secondary'>Try Again</button></a>"))
 
-    d = user_dir(token)
-    cookies_path = save_cookies(d, content)
-
-    if not validate_cookies(cookies_path):
-        return HTMLResponse(page("Error", f"<h1>Invalid Cookies</h1><a href='/refresh/{token}'><button class='btn btn-secondary'>Try Again</button></a>"))
+    if content is not None:
+        cookies_path = save_cookies(d, content)
+        delete_credentials(d)
+        if not validate_cookies(cookies_path):
+            return HTMLResponse(page("Error", f"<h1>Invalid Cookies</h1><a href='/refresh/{token}'><button class='btn btn-secondary'>Try Again</button></a>"))
 
     (d / "catalog.json").unlink(missing_ok=True)
     (d / "error.txt").unlink(missing_ok=True)

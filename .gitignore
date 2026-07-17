@@ -1,3 +1,8 @@
+# Encrypted-login key and local deployment artifacts
+credential.key
+*.zip
+*.backup
+
 # Secrets
 cron_env.sh
 khdiamond.env
