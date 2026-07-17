@@ -4,7 +4,6 @@ user_scrape.py — Per-user scraper (no Google Sheet)
 Reads cookies from $COOKIES_PATH
 Writes to $USER_DIR/library_raw.json
 """
-import re
 import sys
 import os
 import json
@@ -13,6 +12,7 @@ from http.cookiejar import MozillaCookieJar
 
 import requests
 from bs4 import BeautifulSoup
+from khdiamond_http import is_login_page, library_rows
 
 LIBRARY_URL  = "https://khdiamond.net/my-account/"
 COOKIES_PATH = Path(os.environ.get("COOKIES_PATH", "/root/khdiamond/cookies.txt"))
@@ -36,51 +36,13 @@ def main():
     r.raise_for_status()
     html = r.text
     print(f"  ← {len(html):,} bytes")
-    if len(html) < 20_000 or "<h1>Log in</h1>" in html:
+    if is_login_page(r):
         # Write expired marker for web UI
         expired_path = Path(os.environ.get("USER_DIR", "/root/khdiamond")) / "expired.txt"
         expired_path.write_text("Cookies expired")
         sys.exit("❌ Got login page — cookies expired.")
 
-    soup = BeautifulSoup(html, "html.parser")
-    path_re = re.compile(r"/(movies|tvshows|series|tvshow|episode)/([^/]+)/?")
-
-    rows = []
-    for art in soup.find_all("article"):
-        h3 = art.find("h3")
-        if not h3:
-            continue
-        link = h3.find("a", href=True)
-        if not link:
-            continue
-        m = path_re.search(link["href"])
-        if not m:
-            continue
-        kind, slug = m.group(1), m.group(2)
-
-        year = ""
-        data_div = art.find("div", class_="data")
-        if data_div and (y := data_div.find("span")):
-            year = y.get_text(strip=True)
-
-        rows.append({
-            "slug":       slug,
-            "title":      link.get_text(strip=True),
-            "kind":       kind,
-            "year":       year,
-            "page_url":   link["href"],
-            "article_id": art.get("id", ""),
-        })
-
-    # Deduplicate
-    seen = set()
-    deduped = []
-    for row in rows:
-        key = (row["slug"], row["kind"])
-        if key not in seen:
-            seen.add(key)
-            deduped.append(row)
-    rows = deduped
+    rows = library_rows(html, r.url)
 
     if not rows:
         sys.exit("❌ Zero items parsed — check cookies or site structure.")

@@ -15,6 +15,8 @@ from http.cookiejar import MozillaCookieJar
 
 import requests
 from bs4 import BeautifulSoup
+from khdiamond_http import (extract_media_id, extract_nonce, extract_post_id,
+                            response_embed_url)
 
 COOKIES_PATH = Path(os.environ.get("COOKIES_PATH", "/root/khdiamond/cookies.txt"))
 USER_DIR     = Path(os.environ.get("USER_DIR", "/root/khdiamond"))
@@ -28,7 +30,6 @@ RETRY_DELAY  = 2.0
 MAX_RETRIES  = 4
 BACKOFF_BASE = 3
 
-EMBED_ID_RE = re.compile(r"player\.kh-diamond\.net/\d+/\d+/([A-Za-z0-9]+)")
 POSTID_RE   = re.compile(r"postid-(\d+)")
 EP_LINK_RE  = re.compile(r'href=["\'](https?://khdiamond\.net/episodes/[^"\']+/)["\']')
 NUM_RE      = re.compile(r"(\d+)\s*-\s*(\d+)")
@@ -50,11 +51,28 @@ def make_session() -> requests.Session:
 
 def call_player_ajax(session, post_id, kind, referer, nume="1"):
     out = {"status": "", "movie_id": "", "embed_url": ""}
+    cache = getattr(session, "_khdiamond_page_cache", {})
+    page_html = cache.get(referer, "")
+    if not page_html:
+        try:
+            page = session.get(referer, timeout=20)
+            page.raise_for_status()
+            page_html = page.text
+            cache[referer] = page_html
+            session._khdiamond_page_cache = cache
+        except requests.RequestException as exc:
+            out["status"] = f"page_err:{type(exc).__name__}"
+            return out
+    nonce = extract_nonce(page_html)
+    if not nonce:
+        out["status"] = "nonce_missing"
+        return out
     payload = {
         "action": "doo_player_ajax",
         "post":   post_id,
         "nume":   nume,
         "type":   "tv" if kind == "tvshows" else "movie",
+        "nonce":  nonce,
     }
     headers = {"Referer": referer}
 
@@ -78,19 +96,14 @@ def call_player_ajax(session, post_id, kind, referer, nume="1"):
         if r.status_code != 200:
             out["status"] = f"http_{r.status_code}"; return out
 
-        try:
-            data = r.json()
-        except Exception:
-            out["status"] = "bad_json"; return out
-
-        embed = data.get("embed_url", "")
+        embed = response_embed_url(r)
         out["embed_url"] = embed
-        m = EMBED_ID_RE.search(embed)
-        if m:
-            out["movie_id"] = m.group(1)
+        movie_id = extract_media_id(embed)
+        if movie_id:
+            out["movie_id"] = movie_id
             out["status"] = "ok"
         else:
-            out["status"] = "no_id_in_embed"
+            out["status"] = "player_rejected" if r.text.strip() == "0" else "no_id_in_embed"
         return out
 
     out["status"] = "http_429_giveup"
@@ -206,6 +219,17 @@ def main():
         art = str(row.get("article_id", "")).lstrip("p").strip()
         out = dict(row)
         out["movie_id_4k"] = ""
+
+        if not art.isdigit() and row.get("page_url"):
+            try:
+                page = session.get(row["page_url"], timeout=20)
+                page.raise_for_status()
+                art = extract_post_id(page.text)
+                cache = getattr(session, "_khdiamond_page_cache", {})
+                cache[row["page_url"]] = page.text
+                session._khdiamond_page_cache = cache
+            except requests.RequestException:
+                pass
 
         if not art.isdigit():
             out.update({"status": "bad_article_id", "movie_id": "", "embed_url": ""})
