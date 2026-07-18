@@ -18,6 +18,8 @@ import sys
 import json
 import time
 import hashlib
+import unicodedata
+from difflib import SequenceMatcher
 from pathlib import Path
 from http.cookiejar import MozillaCookieJar
 import re as _re
@@ -55,6 +57,11 @@ TMDB_HEADERS = {
 
 PAGE_DELAY  = 0.5
 TMDB_DELAY  = 0.3
+CACHE_VERSION = 3
+TMDB_MIN_SCORE = float(os.environ.get("TMDB_MIN_MATCH_SCORE", "80"))
+RESOLVE_FREE_STREAMS = os.environ.get("FULL_CATALOG_RESOLVE_FREE_STREAMS", "0").lower() in {"1", "true", "yes"}
+MIN_CATALOG_RATIO = float(os.environ.get("FULL_CATALOG_MIN_PREVIOUS_RATIO", "0.90"))
+ALLOW_LARGE_SHRINK = os.environ.get("FULL_CATALOG_ALLOW_LARGE_SHRINK", "0").lower() in {"1", "true", "yes"}
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -73,13 +80,65 @@ def load_cache() -> dict:
     return {}
 
 
+def existing_catalog_count() -> int:
+    if not OUTPUT_PATH.exists():
+        return 0
+    try:
+        value = json.loads(OUTPUT_PATH.read_text())
+        return len(value) if isinstance(value, list) else 0
+    except Exception:
+        return 0
+
+
+def catalog_size_is_safe(current: int, previous: int) -> bool:
+    return previous <= 0 or current >= previous * MIN_CATALOG_RATIO
+
+
+def write_json_atomic(path: Path, value) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_name(path.name + ".tmp")
+    temporary.write_text(json.dumps(value, ensure_ascii=False, indent=2))
+    os.replace(temporary, path)
+
+
 def save_cache(cache: dict):
-    CACHE_PATH.write_text(json.dumps(cache, ensure_ascii=False, indent=2))
+    write_json_atomic(CACHE_PATH, cache)
 
 
 def slug_from_url(url: str) -> str:
     """Extract slug from khdiamond URL."""
     return url.rstrip("/").rsplit("/", 1)[-1]
+
+
+def valid_poster_url(value: str) -> bool:
+    value = str(value or "").strip()
+    if not value.startswith(("http://", "https://")):
+        return False
+    lowered = value.lower().split("?", 1)[0]
+    filename = lowered.rsplit("/", 1)[-1]
+    return not (
+        "/themes/dooplay/assets/img/" in lowered
+        or re.fullmatch(r"s{3,}\d*\.(?:png|jpe?g|webp)", filename)
+    )
+
+
+def source_signature(item: dict, stype: str) -> str:
+    """Identify the current page, not merely its reusable opaque slug."""
+    payload = "\n".join((
+        str(stype or ""),
+        str(item.get("page_url") or "").rstrip("/"),
+        " ".join(str(item.get("title_khmer") or "").split()),
+    ))
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+def cache_entry_is_current(entry: dict, item: dict, stype: str) -> bool:
+    return (
+        entry.get("_cache_version") == CACHE_VERSION
+        and entry.get("_source_signature") == source_signature(item, stype)
+        and entry.get("slug") == item.get("slug")
+        and entry.get("type") == stype
+    )
 
 
 def apply_manual_metadata(entry: dict) -> dict:
@@ -128,8 +187,8 @@ def scrape_listing_page(session: requests.Session, url: str) -> list[dict]:
         imgs = art.select("div.poster img")
         poster = ""
         for img in imgs:
-            src = img.get("src", "")
-            if src and "sss1.png" not in src and src.startswith("http"):
+            src = img.get("data-src") or img.get("data-lazy-src") or img.get("src", "")
+            if valid_poster_url(src):
                 poster = src
                 break
 
@@ -153,7 +212,9 @@ def text_tokens(value: str) -> set[str]:
 
 
 def normalized_title(value: str) -> str:
-    value = " ".join(_re.findall(r"[a-z0-9]+", str(value or "").lower()))
+    value = unicodedata.normalize("NFKC", str(value or "")).casefold()
+    value = _re.sub(r"[^\w]+", " ", value, flags=_re.UNICODE).replace("_", " ")
+    value = " ".join(value.split())
     return _re.sub(r"^(the|a|an)\s+", "", value).strip()
 
 
@@ -163,17 +224,22 @@ def score_tmdb_candidate(candidate: dict, title: str, year: str = "", overview_h
     candidate_titles = [normalized_title(n) for n in names if n]
     score = 0.0
 
-    if query_title and any(t == query_title for t in candidate_titles):
-        score += 90
+    similarities = [SequenceMatcher(None, query_title, t).ratio()
+                    for t in candidate_titles if query_title and t]
+    best_similarity = max(similarities, default=0.0)
+    if best_similarity == 1.0:
+        score += 100
+    elif best_similarity >= 0.88:
+        score += 70 * best_similarity
     elif query_title and any(query_title in t or t in query_title for t in candidate_titles):
-        score += 35
+        score += 30
 
     release = candidate.get("release_date") or candidate.get("first_air_date") or ""
     candidate_year = release[:4] if release else ""
     if year and candidate_year == str(year):
-        score += 70
+        score += 35
     elif year and candidate_year:
-        score -= 30
+        score -= 45
 
     hint_tokens = text_tokens(overview_hint)
     overview_tokens = text_tokens(candidate.get("overview", ""))
@@ -185,6 +251,27 @@ def score_tmdb_candidate(candidate: dict, title: str, year: str = "", overview_h
     return score
 
 
+def acceptable_tmdb_candidate(candidate: dict, title: str, year: str, score: float) -> bool:
+    """Reject plausible-looking but unsafe matches; a blank ID is safer than a wrong ID."""
+    query_title = normalized_title(title)
+    if not query_title:
+        return False
+    candidate_titles = [
+        normalized_title(candidate.get(key, ""))
+        for key in ("title", "name", "original_title", "original_name")
+    ]
+    candidate_titles = [value for value in candidate_titles if value]
+    best_similarity = max(
+        (SequenceMatcher(None, query_title, value).ratio() for value in candidate_titles),
+        default=0.0,
+    )
+    release = candidate.get("release_date") or candidate.get("first_air_date") or ""
+    candidate_year = release[:4]
+    if year and candidate_year and str(year) != candidate_year:
+        return False
+    return score >= TMDB_MIN_SCORE and best_similarity >= 0.88
+
+
 def fetch_tmdb(title: str, year: str, media_type: str, overview_hint: str = "") -> dict:
     """Fetch metadata from TMDB. Returns enriched dict."""
     if not TMDB_TOKEN:
@@ -192,7 +279,7 @@ def fetch_tmdb(title: str, year: str, media_type: str, overview_hint: str = "") 
     try:
         params = {"query": title, "language": "en-US"}
         if year:
-            params["year"] = year
+            params["year" if media_type == "movie" else "first_air_date_year"] = year
         r = requests.get(
             f"https://api.themoviedb.org/3/search/{media_type}",
             headers=TMDB_HEADERS, params=params, timeout=10
@@ -201,7 +288,12 @@ def fetch_tmdb(title: str, year: str, media_type: str, overview_hint: str = "") 
             return {}
 
         results = r.json()["results"]
-        top = max(results, key=lambda item: score_tmdb_candidate(item, title, year, overview_hint))
+        scored = [(score_tmdb_candidate(item, title, year, overview_hint), item)
+                  for item in results]
+        best_score, top = max(scored, key=lambda pair: pair[0])
+        if not acceptable_tmdb_candidate(top, title, year, best_score):
+            print(f"    TMDB rejected low-confidence match for '{title}' (score {best_score:.1f})")
+            return {}
         tmdb_id = top.get("id")
         time.sleep(TMDB_DELAY)
 
@@ -271,6 +363,7 @@ def fetch_tmdb(title: str, year: str, media_type: str, overview_hint: str = "") 
             "overview":      overview,
             "imdb_rating":   imdb_rating,
             "runtime":       runtime,
+            "match_score":   round(best_score, 1),
         }
     except Exception as e:
         print(f"    TMDB error for '{title}': {e}")
@@ -284,17 +377,36 @@ def scrape_khmer_overview(session: requests.Session, page_url: str) -> str:
 
 def scrape_page_details(session: requests.Session, page_url: str) -> dict:
     """Scrape stable detail-page metadata that listing/TMDB can miss."""
-    details = {"overview": "", "poster": "", "year": "", "runtime": ""}
+    details = {"overview": "", "poster": "", "year": "", "runtime": "",
+               "title_khmer": "", "original_title": "", "status_code": 0}
     try:
-        r = session.get(page_url, timeout=20)
+        r = None
+        for attempt in range(3):
+            r = session.get(page_url, timeout=20)
+            details["status_code"] = r.status_code
+            if r.status_code not in {429, 500, 502, 503, 504}:
+                break
+            time.sleep(1.5 * (attempt + 1))
+        if r is None:
+            return details
         if r.status_code != 200:
             return details
         soup = BeautifulSoup(r.text, "html.parser")
-        poster = soup.select_one("div.sheader div.poster img[src], div.poster img[src]")
-        if poster:
-            src = poster.get("src", "")
-            if src.startswith("http") and "sss1.png" not in src:
+        h1 = soup.select_one("div.data h1, h1")
+        if h1:
+            details["title_khmer"] = h1.get_text(" ", strip=True)
+        for field in soup.select("div.custom_fields"):
+            label = field.select_one("b.variante")
+            value = field.select_one("span.valor")
+            if label and value and "ចំណងជើងដើម" in label.get_text(" ", strip=True):
+                details["original_title"] = value.get_text(" ", strip=True)
+                break
+        for poster in soup.select("div.sheader div.poster img, div.poster img"):
+            src = (poster.get("data-src") or poster.get("data-lazy-src")
+                   or poster.get("data-original") or poster.get("src", ""))
+            if valid_poster_url(src):
                 details["poster"] = src
+                break
         date_tag = soup.select_one("span.date")
         if date_tag:
             year_m = re.search(r"\d{4}", date_tag.get_text(strip=True))
@@ -577,13 +689,16 @@ def get_free_slugs(session: requests.Session) -> set:
 def main():
     session = make_session()
     cache = load_cache()
+    previous_count = existing_catalog_count()
     all_items = []
 
     print("\n→ Scraping free genre slugs...")
     free_slugs = get_free_slugs(session)
-    auth_session = make_auth_session()
+    auth_session = make_auth_session() if RESOLVE_FREE_STREAMS else None
     if auth_session:
         print("✓ Auth session ready for free stream resolution")
+    elif not RESOLVE_FREE_STREAMS:
+        print("✓ Public metadata mode — free stream resolution disabled")
     else:
         print("⚠ No cookies found — free streams won't be resolved")
 
@@ -617,6 +732,13 @@ def main():
 
     print(f"\n{'='*60}")
     print(f"Total scraped: {len(all_items)} items")
+    if (not ALLOW_LARGE_SHRINK
+            and not catalog_size_is_safe(len(all_items), previous_count)):
+        raise RuntimeError(
+            f"Refusing incomplete catalog: listing returned {len(all_items)} items, "
+            f"previous catalog has {previous_count}. Set "
+            "FULL_CATALOG_ALLOW_LARGE_SHRINK=1 only for an intentional removal."
+        )
     print(f"Enriching with TMDB metadata...")
     print("=" * 60)
 
@@ -626,29 +748,31 @@ def main():
         title_khmer = item["title_khmer"]
         cache_key  = hashlib.md5(slug.encode()).hexdigest()
 
-        if cache_key in cache and cache[cache_key].get("overview_en") is not None:
-            entry = cache[cache_key]
+        if cache_key in cache and cache_entry_is_current(cache[cache_key], item, stype):
+            entry = dict(cache[cache_key])
+            entry.update({
+                "slug": slug,
+                "type": stype,
+                "title_khmer": title_khmer,
+                "page_url": item["page_url"],
+            })
+            if valid_poster_url(item.get("poster")):
+                entry["poster"] = item["poster"]
+            elif not valid_poster_url(entry.get("poster")):
+                entry["poster"] = ""
+            if item.get("rating"):
+                entry["imdb_rating"] = item["rating"]
             entry["is_free"] = slug in free_slugs or "ឥតគិតថ្លៃ" in title_khmer
             apply_manual_metadata(entry)
-            if stype == "series" and tmdb_metadata_mismatch(entry):
-                print(f"  [{i:>3}/{len(all_items)}] refreshing mismatched TMDB metadata {title_khmer[:40]}")
-                details = scrape_page_details(session, item["page_url"])
-                search_title = extract_english_from_khmer_title(title_khmer) or title_khmer
-                tmdb = fetch_tmdb(search_title, details.get("year", ""), media_type, overview_hint=details.get("overview", ""))
-                if tmdb:
-                    apply_tmdb_metadata(entry, tmdb)
-                    if details.get("overview"):
-                        entry["overview"] = details["overview"]
-                    if details.get("poster") and not entry.get("poster"):
-                        entry["poster"] = details["poster"]
-                    update_series_episode_ids(entry)
-                    cache[cache_key] = entry
-                    time.sleep(PAGE_DELAY)
             if stype == "series":
                 update_series_episode_ids(entry)
             if not entry.get("poster"):
                 print(f"  [{i:>3}/{len(all_items)}] refreshing poster {title_khmer[:40]}")
                 details = scrape_page_details(session, item["page_url"])
+                if details.get("status_code") == 404:
+                    print(f"    skipping broken listing (detail page is 404): {item['page_url']}")
+                    cache.pop(cache_key, None)
+                    continue
                 if details.get("poster"):
                     entry["poster"] = details["poster"]
                 if details.get("overview") and not entry.get("overview"):
@@ -659,14 +783,18 @@ def main():
                     entry["runtime"] = details["runtime"]
                 cache[cache_key] = entry
                 time.sleep(PAGE_DELAY)
-            if stype == "series" and (not entry.get("episodes") or (entry["is_free"] and not any(valid_movie_id(ep.get("movie_id")) for ep in entry.get("episodes", [])))):
-                action = "resolving free series episodes" if entry["is_free"] else "scraping series episodes"
+            if stype == "series" and not entry.get("episodes"):
+                action = "scraping series episodes"
                 print(f"  [{i:>3}/{len(all_items)}] {action} {title_khmer[:40]}")
-                entry["episodes"] = resolve_series_episodes(session, auth_session, item["page_url"], entry["khd_id"], imdb_id=entry.get("imdb_id", ""), resolve_streams=entry["is_free"])
+                entry["episodes"] = resolve_series_episodes(
+                    session, auth_session, item["page_url"], entry["khd_id"],
+                    imdb_id=entry.get("imdb_id", ""),
+                    resolve_streams=entry["is_free"] and RESOLVE_FREE_STREAMS,
+                )
                 entry["movie_id"] = ""
                 entry["movie_id_4k"] = ""
                 cache[cache_key] = entry
-            elif entry["is_free"] and stype != "series" and (not valid_movie_id(entry.get("movie_id"))) and auth_session:
+            elif RESOLVE_FREE_STREAMS and entry["is_free"] and stype != "series" and (not valid_movie_id(entry.get("movie_id"))) and auth_session:
                 print(f"  [{i:>3}/{len(all_items)}] resolving free stream {title_khmer[:40]}")
                 streams = resolve_free_stream(auth_session, item["page_url"], stype)
                 entry["movie_id"] = streams["movie_id"]
@@ -675,18 +803,24 @@ def main():
                 time.sleep(PAGE_DELAY)
             else:
                 print(f"  [{i:>3}/{len(all_items)}] reused  {title_khmer[:55]}")
-            catalog.append(entry)
+            cache[cache_key] = entry
+            catalog.append({k: v for k, v in entry.items() if not k.startswith("_")})
             continue
 
         # Extract English title for TMDB search
         title_english = extract_english_from_khmer_title(title_khmer)
-        search_title  = title_english or title_khmer
 
         print(f"  [{i:>3}/{len(all_items)}] fetching {title_khmer[:55]}")
 
         # Scrape detail-page fields first so TMDB matching can disambiguate common titles.
         details = scrape_page_details(session, item["page_url"])
+        if details.get("status_code") == 404:
+            print(f"    skipping broken listing (detail page is 404): {item['page_url']}")
+            cache.pop(cache_key, None)
+            continue
         khmer_overview = details.get("overview", "")
+        original_title = details.get("original_title", "")
+        search_title = original_title or title_english or title_khmer
         time.sleep(PAGE_DELAY)
 
         tmdb = fetch_tmdb(search_title, details.get("year", ""), media_type, overview_hint=khmer_overview)
@@ -700,10 +834,14 @@ def main():
         episodes = []
         is_free_item = slug in free_slugs or "ឥតគិតថ្លៃ" in title_khmer
         if stype == "series":
-            action = "resolving free series episodes" if is_free_item else "scraping series episodes"
+            action = "scraping series episodes"
             print(f"    → {action} for {slug}")
-            episodes = resolve_series_episodes(session, auth_session, item["page_url"], khd_id, imdb_id=tmdb.get("imdb_id", ""), resolve_streams=is_free_item)
-        elif is_free_item and auth_session:
+            episodes = resolve_series_episodes(
+                session, auth_session, item["page_url"], khd_id,
+                imdb_id=tmdb.get("imdb_id", ""),
+                resolve_streams=is_free_item and RESOLVE_FREE_STREAMS,
+            )
+        elif RESOLVE_FREE_STREAMS and is_free_item and auth_session:
             print(f"    → resolving free stream for {slug}")
             streams = resolve_free_stream(auth_session, item["page_url"], stype)
             movie_id = streams["movie_id"]
@@ -719,9 +857,11 @@ def main():
             "episodes":      episodes,
             "type":          stype,
             "title_khmer":   title_khmer,
-            "title_english": tmdb.get("title_english") or title_english or title_khmer,
+            "title_english": tmdb.get("title_english") or original_title or title_english or title_khmer,
+            "original_title": original_title,
             "year":          tmdb.get("year") or details.get("year", ""),
-            "poster":        item.get("poster") if item.get("poster") and "sss" not in item.get("poster","") else details.get("poster") or tmdb.get("tmdb_poster", ""),
+            "poster":        (item.get("poster") if valid_poster_url(item.get("poster"))
+                              else details.get("poster") or tmdb.get("tmdb_poster", "")),
             "tmdb_poster":   tmdb.get("tmdb_poster", ""),
             "backdrop":      tmdb.get("backdrop", ""),
             "genres":        tmdb.get("genres", []),
@@ -732,16 +872,20 @@ def main():
             "imdb_rating":   item.get("rating") or tmdb.get("imdb_rating", ""),
             "runtime":       tmdb.get("runtime") or details.get("runtime", ""),
             "page_url":      item["page_url"],
+            "tmdb_match_score": tmdb.get("match_score", ""),
+            "_cache_version": CACHE_VERSION,
+            "_source_signature": source_signature(item, stype),
         }
         apply_manual_metadata(entry)
+        update_series_episode_ids(entry)
 
         cache[cache_key] = entry
-        catalog.append(entry)
+        catalog.append({k: v for k, v in entry.items() if not k.startswith("_")})
         time.sleep(PAGE_DELAY)
 
     save_cache(cache)
 
-    OUTPUT_PATH.write_text(json.dumps(catalog, ensure_ascii=False, indent=2))
+    write_json_atomic(OUTPUT_PATH, catalog)
 
     print(f"\n{'='*60}")
     print(f"✓ full_catalog.json written → {OUTPUT_PATH}")

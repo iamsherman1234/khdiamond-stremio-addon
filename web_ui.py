@@ -5,10 +5,12 @@ For subdomain: khdiamond-ui.sudolocal.qzz.io
 """
 
 import os
+import re
 import uuid
 import json
 import subprocess
 import threading
+from urllib.parse import parse_qs
 from pathlib import Path
 from datetime import datetime
 from http.cookiejar import MozillaCookieJar
@@ -21,8 +23,9 @@ from khdiamond_credentials import (delete_credentials,
                                     save_credentials)
 
 # ── Config ────────────────────────────────────────────────────────────────────
-BASE_DIR = Path("/root/khdiamond")
+BASE_DIR = Path(os.environ.get("KH_DIAMOND_BASE_DIR", "/root/khdiamond"))
 USERS_DIR = BASE_DIR / "users"
+FULL_CATALOG_PATH = Path(os.environ.get("FULL_CATALOG_PATH", str(BASE_DIR / "full_catalog.json")))
 ADDON_BASE = os.environ.get("KH_DIAMOND_UI_BASE", "https://khdiamond-ui.sudolocal.qzz.io").rstrip("/")
 
 USERS_DIR.mkdir(parents=True, exist_ok=True)
@@ -35,6 +38,16 @@ CORS_HEADERS = {
     "Access-Control-Allow-Headers": "*",
     "Content-Type": "application/json; charset=utf-8",
 }
+IMDB_ID_RE = re.compile(r"^tt\d{7,10}$")
+
+def usable_poster_url(value: str) -> str:
+    value = str(value or "").strip()
+    lowered = value.lower().split("?", 1)[0]
+    if not value.startswith(("http://", "https://")):
+        return ""
+    if "/themes/dooplay/assets/img/" in lowered:
+        return ""
+    return value
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 def user_dir(token: str) -> Path:
@@ -75,11 +88,24 @@ def load_catalog(token: str):
     except Exception:
         return []
 
+def load_full_catalog():
+    if not FULL_CATALOG_PATH.exists():
+        return []
+    try:
+        catalog = json.loads(FULL_CATALOG_PATH.read_text())
+        return catalog if isinstance(catalog, list) else []
+    except Exception:
+        return []
+
 def normalize_imdb_id(value: str) -> str:
     value = str(value or "").strip()
     if not value:
         return ""
     return value if value.startswith("tt") else "tt" + value.removeprefix("tt")
+
+def verified_imdb_id(value: str) -> str:
+    value = normalize_imdb_id(value)
+    return value if IMDB_ID_RE.fullmatch(value) else ""
 
 def item_matches_id(item: dict, token: str, id: str) -> bool:
     prefix = f"khd_{token}_"
@@ -88,6 +114,115 @@ def item_matches_id(item: dict, token: str, id: str) -> bool:
     if id.startswith("tt"):
         return normalize_imdb_id(item.get("imdb_id")) == id
     return False
+
+def split_video_id(value: str):
+    """Return (base id, season, episode); movie IDs have no season/episode."""
+    parts = str(value or "").rsplit(":", 2)
+    if len(parts) == 3 and parts[1].isdigit() and parts[2].isdigit():
+        return parts[0], int(parts[1]), int(parts[2])
+    return str(value or ""), None, None
+
+def public_item_id(item: dict) -> str:
+    imdb_id = verified_imdb_id(item.get("imdb_id"))
+    if imdb_id:
+        return imdb_id
+    slug = str(item.get("slug") or "").strip()
+    return f"khdcat_{slug}" if slug else str(item.get("khd_id") or "")
+
+def full_item_matches_id(item: dict, value: str) -> bool:
+    base_id, _, _ = split_video_id(value)
+    if base_id.startswith("tt"):
+        return verified_imdb_id(item.get("imdb_id")) == base_id
+    if base_id.startswith("khdcat_"):
+        return item.get("slug") == base_id[len("khdcat_"):]
+    return item.get("khd_id") == base_id
+
+def find_full_item(catalog: list, media_type: str, value: str):
+    return next((item for item in catalog
+                 if item.get("type") == media_type and full_item_matches_id(item, value)), None)
+
+def find_full_items(catalog: list, media_type: str, value: str) -> list:
+    return [item for item in catalog
+            if item.get("type") == media_type and full_item_matches_id(item, value)]
+
+def episode_videos(item: dict) -> list:
+    base_id = public_item_id(item)
+    videos = []
+    for ep in item.get("episodes", []) or []:
+        try:
+            season = int(ep.get("season") or 1)
+            episode = int(ep.get("episode") or 1)
+        except (TypeError, ValueError):
+            continue
+        video = {
+            "id": f"{base_id}:{season}:{episode}",
+            "title": ep.get("title") or f"Episode {episode}",
+            "season": season,
+            "episode": episode,
+        }
+        if ep.get("thumbnail"):
+            video["thumbnail"] = ep["thumbnail"]
+        released = str(ep.get("released") or "")
+        if released and len(released) >= 10 and released[4:5] == "-":
+            video["released"] = released
+        videos.append(video)
+    return videos
+
+def stremio_meta(item: dict, include_videos: bool = False) -> dict:
+    description = item.get("overview") or item.get("overview_en") or ""
+    khmer_title = item.get("title_khmer") or ""
+    english_title = item.get("title_english") or item.get("original_title") or ""
+    if khmer_title and english_title and khmer_title != english_title:
+        description = f"{khmer_title}\n\n{description}".strip()
+    meta = {
+        "id": public_item_id(item),
+        "type": item.get("type", "movie"),
+        "name": english_title or khmer_title,
+        "poster": usable_poster_url(item.get("poster")) or usable_poster_url(item.get("tmdb_poster")),
+        "background": item.get("backdrop") or "",
+        "description": description,
+        "year": item.get("year") or "",
+        "imdbRating": item.get("imdb_rating") or "",
+        "genres": item.get("genres") or [],
+    }
+    if include_videos and item.get("type") == "series":
+        meta["videos"] = episode_videos(item)
+    return meta
+
+def normalized_page_url(value: str) -> str:
+    return str(value or "").rstrip("/")
+
+def episode_number(value, default: int = 1):
+    try:
+        return int(value or default)
+    except (TypeError, ValueError):
+        return default
+
+def find_purchased_item(personal: list, full_item: dict, requested_id: str):
+    """Map a public catalog ID to an owned movie/episode without trusting stale IDs."""
+    _, season, episode = split_video_id(requested_id)
+    if full_item.get("type") == "series":
+        if season is None or episode is None:
+            return None
+        full_episode = next((ep for ep in full_item.get("episodes", []) or []
+                             if episode_number(ep.get("season")) == season
+                             and episode_number(ep.get("episode")) == episode), None)
+        if not full_episode:
+            return None
+        episode_slug = full_episode.get("page_url", "").rstrip("/").rsplit("/", 1)[-1]
+        episode_slug = full_episode.get("slug") or episode_slug
+        episode_url = normalized_page_url(full_episode.get("page_url"))
+        return next((item for item in personal
+                     if item.get("type") == "series"
+                     and ((episode_slug and item.get("slug") == episode_slug)
+                          or (episode_url and normalized_page_url(item.get("page_url")) == episode_url))), None)
+
+    slug = full_item.get("slug") or ""
+    page_url = normalized_page_url(full_item.get("page_url"))
+    return next((item for item in personal
+                 if item.get("type") == "movie"
+                 and ((slug and item.get("slug") == slug)
+                      or (page_url and normalized_page_url(item.get("page_url")) == page_url))), None)
 
 def make_proxy_url(mf_base: str, original_url: str) -> str:
     MF_PASSWORD = os.environ.get("MEDIAFLOW_PASSWORD", "")
@@ -435,24 +570,24 @@ async def user_manifest(token: str):
 
     return JSONResponse({
         "id": f"com.khdiamond.user.{token}",
-        "version": "1.0.0",
+        "version": "2.0.0",
         "name": f"KhDiamond ({token})",
-        "description": "Your personal Khmer dubbed movie library.",
+        "description": "KhDiamond's full Khmer catalog with streams unlocked by your account.",
         "logo": "https://khdiamond.net/wp-content/uploads/2025/02/khdiamond-logo.png",
         "resources": ["catalog", "meta", "stream"],
         "types": ["movie", "series"],
-        "idPrefixes": [f"khd_{token}_", "tt"],
+        "idPrefixes": ["tt", "khdcat_", f"khd_{token}_"],
         "catalogs": [
-            {"type": "movie", "id": f"khdiamond_movies_{token}", "name": "KhDiamond Movies", "extra": [{"name": "search", "isRequired": False}]},
-            {"type": "series", "id": f"khdiamond_series_{token}", "name": "KhDiamond Series", "extra": [{"name": "search", "isRequired": False}]},
+            {"type": "movie", "id": f"khdiamond_movies_{token}", "name": "KhDiamond — All Movies", "extra": [{"name": "search", "isRequired": False}]},
+            {"type": "series", "id": f"khdiamond_series_{token}", "name": "KhDiamond — All Series", "extra": [{"name": "search", "isRequired": False}]},
         ],
         "behaviorHints": {"adult": False, "p2p": False},
     }, headers=CORS_HEADERS)
 
-@app.get("/u/{token}/catalog/{type}/{id}.json")
-async def user_catalog(token: str, type: str, id: str, request: Request):
-    catalog = load_catalog(token)
-    search = request.query_params.get("search", "").lower().strip()
+def build_catalog_response(token: str, type: str, search: str = ""):
+    full_catalog = load_full_catalog()
+    catalog = full_catalog or load_catalog(token)
+    search = str(search or "").lower().strip()
     items = [m for m in catalog if m.get("type") == type]
     if search:
         items = [
@@ -462,48 +597,75 @@ async def user_catalog(token: str, type: str, id: str, request: Request):
             or search in (m.get("slug") or "").lower()
         ]
 
-    prefix = f"khd_{token}_"
-    metas = [{
-        "id": normalize_imdb_id(m.get("imdb_id")) or prefix + m["khd_id"].replace("khd_", ""),
-        "type": m["type"],
-        "name": m.get("title_english") or m.get("title_khmer", ""),
-        "poster": m.get("poster", ""),
-        "background": m.get("backdrop", ""),
-        "description": m.get("overview", ""),
-        "year": m.get("year", ""),
-        "imdbRating": m.get("imdb_rating", ""),
-        "genres": m.get("genres", []),
-    } for m in items]
+    metas = []
+    seen_ids = set()
+    for item in items:
+        if full_catalog:
+            meta = stremio_meta(item)
+        else:
+            fallback_id = (normalize_imdb_id(item.get("imdb_id"))
+                           or f"khd_{token}_" + item.get("khd_id", "").removeprefix("khd_"))
+            meta = stremio_meta(item)
+            meta["id"] = fallback_id
+        if not meta["id"] or meta["id"] in seen_ids:
+            continue
+        seen_ids.add(meta["id"])
+        metas.append(meta)
     return JSONResponse({"metas": metas}, headers=CORS_HEADERS)
+
+@app.get("/u/{token}/catalog/{type}/{id}.json")
+async def user_catalog(token: str, type: str, id: str, request: Request):
+    return build_catalog_response(token, type, request.query_params.get("search", ""))
+
+@app.get("/u/{token}/catalog/{type}/{id}/{extra}.json")
+async def user_catalog_extra(token: str, type: str, id: str, extra: str):
+    """Support native Stremio catalog extras such as search=Doctor%20Strange."""
+    extras = parse_qs(extra, keep_blank_values=True)
+    return build_catalog_response(token, type, extras.get("search", [""])[0])
 
 @app.get("/u/{token}/meta/{type}/{id}.json")
 async def user_meta(token: str, type: str, id: str):
-    if not (id.startswith(f"khd_{token}_") or id.startswith("tt")):
-        return JSONResponse({"meta": None}, headers=CORS_HEADERS)
+    full_catalog = load_full_catalog()
+    item = find_full_item(full_catalog, type, id) if full_catalog else None
+    if item:
+        return JSONResponse({"meta": stremio_meta(item, include_videos=True)}, headers=CORS_HEADERS)
+
     catalog = load_catalog(token)
-    item = next((m for m in catalog if m.get("type") == type and item_matches_id(m, token, id)), None)
+    item = next((m for m in catalog
+                 if m.get("type") == type and item_matches_id(m, token, id)), None)
     if not item:
         return JSONResponse({"meta": None}, headers=CORS_HEADERS)
-
-    desc = (item.get("title_khmer", "") + "\n\n" if item.get("title_khmer") else "") + item.get("overview", "")
-    return JSONResponse({"meta": {
-        "id": id,
-        "type": item["type"],
-        "name": item.get("title_english") or item.get("title_khmer", ""),
-        "poster": item.get("poster", ""),
-        "background": item.get("backdrop", ""),
-        "description": desc.strip(),
-        "year": item.get("year", ""),
-        "imdbRating": item.get("imdb_rating", ""),
-        "genres": item.get("genres", []),
-    }}, headers=CORS_HEADERS)
+    meta = stremio_meta(item, include_videos=True)
+    meta["id"] = id
+    return JSONResponse({"meta": meta}, headers=CORS_HEADERS)
 
 @app.get("/u/{token}/stream/{type}/{id}.json")
 async def user_stream(token: str, type: str, id: str):
-    if not (id.startswith(f"khd_{token}_") or id.startswith("tt")):
-        return JSONResponse({"streams": []}, headers=CORS_HEADERS)
-    catalog = load_catalog(token)
-    item = next((m for m in catalog if m.get("type") == type and item_matches_id(m, token, id)), None)
+    personal = load_catalog(token)
+    full_catalog = load_full_catalog()
+    full_items = find_full_items(full_catalog, type, id) if full_catalog else []
+    if full_items:
+        purchased = []
+        seen_media_ids = set()
+        for full_item in full_items:
+            item = find_purchased_item(personal, full_item, id)
+            media_id = item.get("movie_id") if item else ""
+            if item and media_id and media_id not in seen_media_ids:
+                seen_media_ids.add(media_id)
+                purchased.append(item)
+        streams = []
+        seen_streams = set()
+        for item in purchased:
+            for stream in build_streams(item):
+                key = (stream.get("url"), stream.get("title"))
+                if key not in seen_streams:
+                    seen_streams.add(key)
+                    streams.append(stream)
+        return JSONResponse({"streams": streams}, headers=CORS_HEADERS)
+    else:
+        # Backward compatibility for manifests installed before v2.
+        item = next((m for m in personal
+                     if m.get("type") == type and item_matches_id(m, token, id)), None)
     if not item or not item.get("movie_id"):
         return JSONResponse({"streams": []}, headers=CORS_HEADERS)
     return JSONResponse({"streams": build_streams(item)}, headers=CORS_HEADERS)
