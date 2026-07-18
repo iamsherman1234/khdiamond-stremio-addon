@@ -32,6 +32,7 @@ npm-debug.log
 
 # Backups
 *.bak
+*.before-*
 backup_*/
 
 # Wrangler

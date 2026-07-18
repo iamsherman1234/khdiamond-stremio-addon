@@ -1,9 +1,14 @@
 # KhDiamond Stremio UI
 
-A self-hosted Stremio addon for a user's purchased library on
-[khdiamond.net](https://khdiamond.net). The active deployment profile runs the
-FastAPI UI on port `7003`, publishes it through Cloudflare Tunnel, maintains an
-isolated catalog for each user, and renews expired KhDiamond sessions from
+A self-hosted Stremio addon for [khdiamond.net](https://khdiamond.net). It
+publishes the site's full public movie/series catalog with KhDiamond posters
+and metadata, then unlocks KhDiamond streams only when the installed user's
+account owns the requested title. Verified IMDb IDs let Stremio request streams
+from this addon and every other installed addon for the same movie or episode.
+
+The active deployment runs one FastAPI service on port `7003`, publishes it
+through Cloudflare Tunnel, maintains one public metadata catalog plus an
+isolated entitlement catalog for each user, and renews expired sessions from
 encrypted saved credentials.
 
 > This project is intended for access to content owned or authorized by each
@@ -13,29 +18,29 @@ encrypted saved credentials.
 
 - Username/password login, pasted cookies, or uploaded Netscape `cookies.txt`
 - Stable per-user Stremio manifest URLs
+- Full public KhDiamond catalog for every installed user
+- Shared IMDb IDs for cross-addon stream aggregation
+- Safe KhDiamond-only IDs when an external match cannot be verified
 - Encrypted credential storage for automatic session renewal
 - Purchase scraping for movies and TV shows
 - Episode expansion and current DooPlay nonce-aware player resolution
 - Movie, series-derived, metadata, search, and stream resources for Stremio
 - Correct parent-series poster lookup, including lazy-loaded poster images
 - Up to 12 stream choices from quality, CDN, and MediaFlow combinations
-- Daily per-user catalog refresh with failure isolation and logging
+- Daily public metadata and per-user entitlement refresh with atomic writes
 - One FastAPI/systemd service; the legacy Node port `7002` is not required
 
 ## Active architecture
 
 ```mermaid
 flowchart TD
-    Client["Browser or Stremio"] --> Tunnel["Cloudflare Tunnel"]
-    Tunnel --> UI["FastAPI web_ui.py :7003"]
-    UI --> UserDir["users/{token}"]
-    UserDir --> Scrape["user_scrape.py"]
-    Scrape --> Resolve["user_resolve.py"]
-    Resolve --> Sync["user_sync.py"]
-    Sync --> Catalog["catalog.json"]
-    Catalog --> API["Manifest, catalog, meta, stream APIs"]
-    API --> Proxy["MediaFlow proxy"]
-    Proxy --> CDN["KhDiamond HLS CDN"]
+    Site["khdiamond.net public pages"] --> Full["full_catalog.json: all metadata"]
+    Account["Signed-in KhDiamond account"] --> Personal["users/{token}/catalog.json: owned streams"]
+    Full --> UI["FastAPI :7003"]
+    Personal --> UI
+    UI --> Stremio["Stremio"]
+    Stremio --> Others["Other installed addons via IMDb ID"]
+    UI --> MediaFlow["MediaFlow and KhDiamond CDN"]
 ```
 
 The public UI URL in the reference deployment is:
@@ -86,7 +91,23 @@ Pipeline stages:
    current DooPlay nonce, resolves player responses, and stores media IDs.
 4. `user_sync.py` scrapes KhDiamond metadata, enriches it with TMDB data, uses
    the real parent-series slug for posters, and creates `catalog.json`.
-5. `web_ui.py` serves the catalog through Stremio-compatible HTTP resources.
+5. `scrape_full_catalog.py` independently builds public metadata for every site
+   title. Cache entries include the current title/type/page fingerprint so a
+   reused opaque slug cannot retain an old movie's identity.
+6. `web_ui.py` serves public catalog/meta records, then maps stream requests to
+   the signed-in user's owned page slug or episode URL.
+
+### Identity and entitlement rules
+
+| Situation | Stremio ID | KhDiamond stream |
+|---|---|---|
+| Confident TMDB/IMDb match | `tt...` | Returned only if the user's catalog contains the same current KhDiamond page |
+| No safe external match | `khdcat_{slug}` | Returned only if owned; other addons cannot merge this custom ID |
+| Full-catalog title not owned | IMDb or KhDiamond ID | Empty KhDiamond stream list; other addons may still respond to IMDb IDs |
+
+The matcher uses the detail page's **original title**, year, and a strict
+similarity threshold. A missing IMDb ID is deliberately preferred over a
+wrong IMDb ID.
 
 ## Stream matrix
 
@@ -111,13 +132,16 @@ travels through a configured MediaFlow instance to a KhDiamond HLS CDN.
 | `user_scrape.py` | Per-user purchased-library scraper |
 | `user_resolve.py` | Episode expansion and player/media-ID resolver |
 | `user_sync.py` | Metadata, poster, TMDB, and catalog generator |
-| `daily_update.sh` | Locked daily entrypoint for UI-only updates |
+| `scrape_full_catalog.py` | Public metadata scraper with source-aware cache and strict TMDB matching |
+| `scripts/audit_full_catalog.py` | Identity, poster, custom-ID, and duplicate-ID coverage report |
+| `daily_update.sh` | Locked public-catalog and per-user daily update |
 | `update_all_users.sh` | Refreshes every valid directory under `users/` |
 | `test_khdiamond_http.py` | Scraping and player-response regression tests |
 | `test_khdiamond_credentials.py` | Credential encryption and permission tests |
+| `test_full_catalog.py` | Cache identity and TMDB-confidence regression tests |
+| `test_web_ui_catalog.py` | Public metadata/private entitlement integration tests |
 | `index.js` | Optional legacy single-user Node addon on port `7002` |
 | `server_*.py`, `sync_catalog.py` | Optional legacy Google Sheets pipeline |
-| `scrape_full_catalog.py` | Optional public-catalog pipeline; not used by UI-only mode |
 
 ## Per-user storage
 
@@ -138,6 +162,13 @@ Each account is isolated under `/root/khdiamond/users/{token}/`:
 
 The encryption master key is stored outside user directories at
 `/root/khdiamond/credential.key` by default.
+
+Shared public state is stored separately:
+
+| File | Contents |
+|---|---|
+| `/root/khdiamond/full_catalog.json` | Atomically published metadata used by catalog/meta endpoints |
+| `/root/khdiamond/full_catalog_cache.json` | Source fingerprint and enrichment cache; never served directly |
 
 ## Requirements
 
@@ -180,6 +211,7 @@ TMDB_ACCESS_TOKEN=replace_with_tmdb_bearer_token
 MEDIAFLOW_URL=https://mediaflow-primary.example.com
 MEDIAFLOW_URL2=https://mediaflow-fallback.example.com
 MEDIAFLOW_PASSWORD=replace_with_mediaflow_password
+FULL_CATALOG_PATH=/root/khdiamond/full_catalog.json
 ```
 
 Protect it:
@@ -279,7 +311,23 @@ Add:
 ```
 
 This runs at midnight in the server's local timezone. `daily_update.sh` uses
-`flock` so a second scheduled run cannot overlap the first.
+`flock` so a second scheduled run cannot overlap the first. It rebuilds the
+local public catalog first and then refreshes per-user entitlements. It does
+not upload to a Cloudflare Worker or KV namespace.
+
+### 6. Build the first public catalog
+
+Run this before installing the manifest so all site titles are available:
+
+```bash
+cd /root/khdiamond
+source cron_env.sh
+python3 scrape_full_catalog.py
+python3 scripts/audit_full_catalog.py
+```
+
+The first run intentionally invalidates legacy cache entries that lack a
+source fingerprint. Later runs reuse unchanged entries and complete faster.
 
 ## Creating an addon
 
@@ -350,6 +398,10 @@ Responses include permissive CORS headers because Stremio clients must access
 the addon remotely. A token acts like an unlisted URL; do not post manifest
 URLs publicly.
 
+Catalog and meta responses read `full_catalog.json`. Stream responses read the
+user's private `users/{token}/catalog.json`. This split is what allows all site
+posters to appear without granting streams the account has not purchased.
+
 ## Operations
 
 ### Service health
@@ -416,10 +468,13 @@ Run the local regression and syntax checks:
 
 ```bash
 cd /root/khdiamond
-python3 -m unittest -v test_khdiamond_http.py test_khdiamond_credentials.py
+python3 -m unittest -v \
+  test_khdiamond_http.py test_khdiamond_credentials.py \
+  test_full_catalog.py test_web_ui_catalog.py
 python3 -m py_compile \
   khdiamond_http.py khdiamond_credentials.py \
-  user_scrape.py user_resolve.py user_sync.py web_ui.py
+  user_scrape.py user_resolve.py user_sync.py web_ui.py \
+  scrape_full_catalog.py scripts/audit_full_catalog.py
 bash -n daily_update.sh update_all_users.sh
 ```
 
@@ -437,6 +492,8 @@ curl -fsS "$BASE/u/$TOKEN/catalog/movie/khdiamond_movies_$TOKEN.json" |
 
 curl -fsS "$BASE/u/$TOKEN/catalog/series/khdiamond_series_$TOKEN.json" |
   python3 -c 'import json,sys; x=json.load(sys.stdin).get("metas", []); print("Series posters: {}/{}".format(sum(bool(i.get("poster")) for i in x), len(x)))'
+
+python3 scripts/audit_full_catalog.py
 ```
 
 ## Troubleshooting
@@ -481,6 +538,13 @@ the fix, move `meta_cache.json` aside and run the resolver and sync again.
 Verify the public API first. If poster URLs are present there, restart Stremio
 or remove and reinstall the addon to clear client-side cached metadata.
 
+### Wrong title or IMDb ID after an opaque slug was reused
+
+The cache must contain `_cache_version: 3` and a `_source_signature`. Deploy
+the current scraper and run it once. Do not copy old IMDb IDs into manual
+overrides unless the match has been verified. The audit script reports
+duplicate IMDb IDs; unmatched items safely use `khdcat_...` IDs.
+
 ### Port or tunnel errors
 
 ```bash
@@ -500,7 +564,8 @@ The repository retains code for earlier deployments:
 - `server_scrape.py`, `server_resolve.py`, and `sync_catalog.py` use Google
   Sheets for a single-user pipeline.
 - `khdiamond-worker` can provide a Cloudflare Worker streaming endpoint.
-- `khdiamond-catalog-worker` can provide a separate public full catalog.
+- `khdiamond-catalog-worker` can provide a separate public full catalog, but
+  the active port-7003 profile reads the local `full_catalog.json` directly.
 
 They are not started, routed, or updated by the UI-only deployment described
 here. Their directories may remain as inactive backups.
