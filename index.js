@@ -13,7 +13,6 @@ const MF_PASSWORD  = process.env.MEDIAFLOW_PASSWORD || "";
 
 const CDN_URLS = [
   "https://media-1.khdmcloud.online/hls/{movie_id}/{quality}.m3u8",
-  "https://khdiamondcdn.asia/hls/{movie_id}/{quality}.m3u8",
   "https://khdm-media.tripplestream.online/hls/{movie_id}/{quality}.m3u8",
 ];
 

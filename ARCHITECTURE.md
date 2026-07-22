@@ -59,7 +59,7 @@
 │                           CDN                                   │
 │                                                                 │
 │  CDN1 → media-1.khdmcloud.online/hls/{id}/{quality}.m3u8       │
-│  CDN2 → khdiamondcdn.asia/hls/{id}/{quality}.m3u8              │
+│  CDN2 → khdm-media.tripplestream.online/hls/{id}/{quality}.m3u8 │
 └─────────────────────────────────────────────────────────────────┘
 ```
 
