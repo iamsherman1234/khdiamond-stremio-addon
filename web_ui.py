@@ -239,6 +239,7 @@ def build_streams(item: dict) -> list:
     cdn_urls = [
         "https://media-1.khdmcloud.online/hls/{movie_id}/{quality}.m3u8",
         "https://khdiamondcdn.asia/hls/{movie_id}/{quality}.m3u8",
+    "https://khdm-media.tripplestream.online/hls/{movie_id}/{quality}.m3u8",
     ]
     mf_servers = [
         {"base": os.environ.get("MEDIAFLOW_URL", "https://sudolocal.qzz.io/mediaflow-py"), "label": "S10"},
