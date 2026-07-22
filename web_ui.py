@@ -242,7 +242,7 @@ def build_streams(item: dict) -> list:
     "https://khdm-media.tripplestream.online/hls/{movie_id}/{quality}.m3u8",
     ]
     mf_servers = [
-        {"base": os.environ.get("MEDIAFLOW_URL", "https://sudolocal.qzz.io/mediaflow-py"), "label": "S10"},
+        {"base": os.environ.get("MEDIAFLOW_URL", "https://sudolocal.qzz.io/mediaflow-py"), "label": "S10+"},
         {"base": os.environ.get("MEDIAFLOW_URL2", "https://mediaflow-proxy-l98z.onrender.com"), "label": "Cloud"},
     ]
 
