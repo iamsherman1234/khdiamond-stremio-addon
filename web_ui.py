@@ -256,7 +256,7 @@ def build_streams(item: dict) -> list:
         if not q.get("movie_id"):
             continue
         for c, cdn in enumerate(cdn_urls):
-            cdn_label = "CDN1" if c == 0 else "CDN2"
+            cdn_label = f"CDN{c + 1}"
             original_url = cdn.replace("{movie_id}", q["movie_id"]).replace("{quality}", q["quality"])
             for mf in mf_servers:
                 url = make_proxy_url(mf["base"], original_url)

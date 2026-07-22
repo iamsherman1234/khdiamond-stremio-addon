@@ -170,7 +170,7 @@ builder.defineStreamHandler(function({ type, id }) {
   // For each quality × CDN × MediaFlow
   for (const q of qualities) {
     for (let c = 0; c < CDN_URLS.length; c++) {
-      const cdnLabel = c === 0 ? "CDN1" : "CDN2";
+      const cdnLabel = `CDN${c + 1}`;
       const originalUrl = CDN_URLS[c]
         .replace("{movie_id}", q.movie_id)
         .replace("{quality}", q.quality);
