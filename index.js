@@ -18,7 +18,7 @@ const CDN_URLS = [
 ];
 
 const MF_SERVERS = [
-  { base: MF_PRIMARY,  label: "S10" },
+  { base: MF_PRIMARY,  label: "S10+" },
   { base: MF_FALLBACK, label: "Cloud" },
 ].filter(function(s) { return Boolean(s.base); });
 
