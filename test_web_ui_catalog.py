@@ -120,6 +120,12 @@ class WebCatalogTest(unittest.TestCase):
             "movie_id": "stream123",
             "movie_id_4k": "",
             "title_english": "Doctor Strange",
+        }, {
+            "type": "series",
+            "slug": "example-show-1x2",
+            "movie_id": "episode123",
+            "movie_id_4k": "",
+            "title_english": "Example Show",
         }]
         (user_path / "catalog.json").write_text(json.dumps(personal))
         unowned = dict(self.movie, slug="unowned", imdb_id="tt7654321", title_english="Unowned")
@@ -133,6 +139,16 @@ class WebCatalogTest(unittest.TestCase):
             token, "movie", f"khdiamond_movies_{token}", FakeRequest()
         )))["metas"]
         self.assertEqual({meta["id"] for meta in movies}, {"tt1211837", "tt7654321"})
+
+        my_movies = response_json(asyncio.run(user_catalog(
+            token, "movie", f"khdiamond_my_movies_{token}", FakeRequest()
+        )))["metas"]
+        self.assertEqual([meta["id"] for meta in my_movies], ["tt1211837"])
+
+        my_series = response_json(asyncio.run(user_catalog(
+            token, "series", f"khdiamond_my_series_{token}", FakeRequest()
+        )))["metas"]
+        self.assertEqual([meta["id"] for meta in my_series], ["tt1234567"])
 
         meta = response_json(asyncio.run(user_meta(token, "series", "tt1234567")))["meta"]
         self.assertEqual(meta["videos"][0]["id"], "tt1234567:1:2")
@@ -156,6 +172,32 @@ class WebCatalogTest(unittest.TestCase):
             token, "movie", f"khdiamond_movies_{token}", "search=Doctor+Strange"
         )))
         self.assertEqual([meta["id"] for meta in result["metas"]], ["tt1211837"])
+
+
+    def test_catalog_skip_query_and_extra_path(self):
+        token = "skipuser"
+        user_path = USERS_DIR / token
+        user_path.mkdir(parents=True, exist_ok=True)
+        (user_path / "catalog.json").write_text("[]")
+        FULL_CATALOG_PATH.parent.mkdir(parents=True, exist_ok=True)
+        items = [
+            dict(self.movie, slug=f"movie-{i}", imdb_id=f"tt123456{i}", title_english=f"Movie {i}")
+            for i in range(5)
+        ]
+        FULL_CATALOG_PATH.write_text(json.dumps(items))
+
+        class SkipRequest:
+            query_params = {"skip": "2"}
+
+        query_result = response_json(asyncio.run(user_catalog(
+            token, "movie", f"khdiamond_movies_{token}", SkipRequest()
+        )))
+        self.assertEqual([meta["name"] for meta in query_result["metas"]], ["Movie 2", "Movie 3", "Movie 4"])
+
+        extra_result = response_json(asyncio.run(user_catalog_extra(
+            token, "movie", f"khdiamond_movies_{token}", "skip=3"
+        )))
+        self.assertEqual([meta["name"] for meta in extra_result["metas"]], ["Movie 3", "Movie 4"])
 
 
 if __name__ == "__main__":

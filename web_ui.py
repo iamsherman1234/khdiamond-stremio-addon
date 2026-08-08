@@ -39,6 +39,7 @@ CORS_HEADERS = {
     "Content-Type": "application/json; charset=utf-8",
 }
 IMDB_ID_RE = re.compile(r"^tt\d{7,10}$")
+CATALOG_PAGE_SIZE = int(os.environ.get("KH_DIAMOND_CATALOG_PAGE_SIZE", "100"))
 
 def usable_poster_url(value: str) -> str:
     value = str(value or "").strip()
@@ -144,6 +145,61 @@ def find_full_item(catalog: list, media_type: str, value: str):
 def find_full_items(catalog: list, media_type: str, value: str) -> list:
     return [item for item in catalog
             if item.get("type") == media_type and full_item_matches_id(item, value)]
+
+def same_site_item(left: dict, right: dict) -> bool:
+    left_slug = str(left.get("slug") or "")
+    right_slug = str(right.get("slug") or "")
+    left_url = normalized_page_url(left.get("page_url"))
+    right_url = normalized_page_url(right.get("page_url"))
+    return bool((left_slug and left_slug == right_slug)
+                or (left_url and left_url == right_url))
+
+def episode_matches_personal(episode: dict, personal_item: dict) -> bool:
+    episode_url = normalized_page_url(episode.get("page_url"))
+    episode_slug = episode.get("slug") or episode_url.rstrip("/").rsplit("/", 1)[-1]
+    personal_url = normalized_page_url(personal_item.get("page_url"))
+    personal_slug = str(personal_item.get("slug") or "")
+    return bool((episode_slug and episode_slug == personal_slug)
+                or (episode_url and episode_url == personal_url))
+
+def purchased_series_episodes(full_item: dict, personal: list) -> list:
+    personal_series = [item for item in personal if item.get("type") == "series"]
+    episodes = []
+    for episode in full_item.get("episodes", []) or []:
+        if any(episode_matches_personal(episode, item) for item in personal_series):
+            episodes.append(episode)
+    return episodes
+
+def purchased_catalog_items(token: str, media_type: str, full_catalog: list, personal: list) -> list:
+    if media_type == "movie":
+        items = []
+        for personal_item in personal:
+            if personal_item.get("type") != "movie":
+                continue
+            full_item = next((item for item in full_catalog
+                              if item.get("type") == "movie" and same_site_item(item, personal_item)), None)
+            if full_item:
+                items.append(full_item)
+            else:
+                fallback = personal_item.copy()
+                fallback["_fallback_id"] = (normalize_imdb_id(fallback.get("imdb_id"))
+                                           or f"khd_{token}_" + fallback.get("khd_id", "").removeprefix("khd_"))
+                items.append(fallback)
+        return items
+
+    if media_type == "series":
+        items = []
+        for full_item in full_catalog:
+            if full_item.get("type") != "series":
+                continue
+            episodes = purchased_series_episodes(full_item, personal)
+            if episodes:
+                item = full_item.copy()
+                item["episodes"] = episodes
+                items.append(item)
+        return items
+
+    return []
 
 def episode_videos(item: dict) -> list:
     base_id = public_item_id(item)
@@ -578,17 +634,36 @@ async def user_manifest(token: str):
         "types": ["movie", "series"],
         "idPrefixes": ["tt", "khdcat_", f"khd_{token}_"],
         "catalogs": [
-            {"type": "movie", "id": f"khdiamond_movies_{token}", "name": "KhDiamond — All Movies", "extra": [{"name": "search", "isRequired": False}]},
-            {"type": "series", "id": f"khdiamond_series_{token}", "name": "KhDiamond — All Series", "extra": [{"name": "search", "isRequired": False}]},
+            {"type": "movie", "id": f"khdiamond_my_movies_{token}", "name": "KhDiamond — My Movies", "extra": [{"name": "search", "isRequired": False}, {"name": "skip", "isRequired": False}]},
+            {"type": "series", "id": f"khdiamond_my_series_{token}", "name": "KhDiamond — My Series", "extra": [{"name": "search", "isRequired": False}, {"name": "skip", "isRequired": False}]},
+            {"type": "movie", "id": f"khdiamond_movies_{token}", "name": "KhDiamond — All Movies", "extra": [{"name": "search", "isRequired": False}, {"name": "skip", "isRequired": False}]},
+            {"type": "series", "id": f"khdiamond_series_{token}", "name": "KhDiamond — All Series", "extra": [{"name": "search", "isRequired": False}, {"name": "skip", "isRequired": False}]},
         ],
         "behaviorHints": {"adult": False, "p2p": False},
     }, headers=CORS_HEADERS)
 
-def build_catalog_response(token: str, type: str, search: str = ""):
+def is_purchased_catalog_id(token: str, media_type: str, catalog_id: str) -> bool:
+    suffix = "movies" if media_type == "movie" else "series"
+    return catalog_id == f"khdiamond_my_{suffix}_{token}"
+
+def parse_skip(value) -> int | None:
+    if value in (None, ""):
+        return None
+    try:
+        return max(0, int(value))
+    except (TypeError, ValueError):
+        return 0
+
+def build_catalog_response(token: str, type: str, search: str = "", skip=None, purchased_only: bool = False):
     full_catalog = load_full_catalog()
-    catalog = full_catalog or load_catalog(token)
+    personal_catalog = load_catalog(token)
+    catalog = full_catalog or personal_catalog
     search = str(search or "").lower().strip()
-    items = [m for m in catalog if m.get("type") == type]
+    skip_value = parse_skip(skip)
+    if purchased_only:
+        items = purchased_catalog_items(token, type, full_catalog, personal_catalog) if full_catalog else [m for m in personal_catalog if m.get("type") == type]
+    else:
+        items = [m for m in catalog if m.get("type") == type]
     if search:
         items = [
             m for m in items
@@ -600,10 +675,11 @@ def build_catalog_response(token: str, type: str, search: str = ""):
     metas = []
     seen_ids = set()
     for item in items:
-        if full_catalog:
+        if full_catalog and not item.get("_fallback_id"):
             meta = stremio_meta(item)
         else:
-            fallback_id = (normalize_imdb_id(item.get("imdb_id"))
+            fallback_id = (item.get("_fallback_id")
+                           or normalize_imdb_id(item.get("imdb_id"))
                            or f"khd_{token}_" + item.get("khd_id", "").removeprefix("khd_"))
             meta = stremio_meta(item)
             meta["id"] = fallback_id
@@ -611,23 +687,40 @@ def build_catalog_response(token: str, type: str, search: str = ""):
             continue
         seen_ids.add(meta["id"])
         metas.append(meta)
+    if skip_value is not None:
+        metas = metas[skip_value:skip_value + CATALOG_PAGE_SIZE]
     return JSONResponse({"metas": metas}, headers=CORS_HEADERS)
 
 @app.get("/u/{token}/catalog/{type}/{id}.json")
 async def user_catalog(token: str, type: str, id: str, request: Request):
-    return build_catalog_response(token, type, request.query_params.get("search", ""))
+    return build_catalog_response(
+        token, type,
+        request.query_params.get("search", ""),
+        request.query_params.get("skip"),
+        is_purchased_catalog_id(token, type, id),
+    )
 
 @app.get("/u/{token}/catalog/{type}/{id}/{extra}.json")
 async def user_catalog_extra(token: str, type: str, id: str, extra: str):
     """Support native Stremio catalog extras such as search=Doctor%20Strange."""
     extras = parse_qs(extra, keep_blank_values=True)
-    return build_catalog_response(token, type, extras.get("search", [""])[0])
+    return build_catalog_response(
+        token, type,
+        extras.get("search", [""])[0],
+        extras.get("skip", [None])[0],
+        is_purchased_catalog_id(token, type, id),
+    )
 
 @app.get("/u/{token}/meta/{type}/{id}.json")
 async def user_meta(token: str, type: str, id: str):
     full_catalog = load_full_catalog()
     item = find_full_item(full_catalog, type, id) if full_catalog else None
     if item:
+        if type == "series":
+            purchased_episodes = purchased_series_episodes(item, load_catalog(token))
+            if purchased_episodes:
+                item = item.copy()
+                item["episodes"] = purchased_episodes
         return JSONResponse({"meta": stremio_meta(item, include_videos=True)}, headers=CORS_HEADERS)
 
     catalog = load_catalog(token)
