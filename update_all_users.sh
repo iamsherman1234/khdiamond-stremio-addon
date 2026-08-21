@@ -28,6 +28,11 @@ for user_dir in "${user_dirs[@]}"; do
         continue
     fi
 
+    # Backup existing non-empty catalog before starting pipeline
+    if [ -f "$catalog" ] && [ -s "$catalog" ]; then
+        cp "$catalog" "${catalog}.bak"
+    fi
+
     echo "[$token] Starting pipeline..." >>"$LOG"
 
     export USER_TOKEN="$token"
@@ -37,23 +42,36 @@ for user_dir in "${user_dirs[@]}"; do
 
     if ! python3 "$BASE_DIR/user_scrape.py" >>"$LOG" 2>&1; then
         echo "[$token] Scrape failed — keeping existing catalog" >>"$LOG"
+        if [ ! -s "$catalog" ] && [ -f "${catalog}.bak" ] && [ -s "${catalog}.bak" ]; then
+            cp "${catalog}.bak" "$catalog"
+        fi
         overall_status=1
+        sleep 3
         continue
     fi
 
     if ! python3 "$BASE_DIR/user_resolve.py" >>"$LOG" 2>&1; then
         echo "[$token] Resolve failed — keeping existing catalog" >>"$LOG"
+        if [ ! -s "$catalog" ] && [ -f "${catalog}.bak" ] && [ -s "${catalog}.bak" ]; then
+            cp "${catalog}.bak" "$catalog"
+        fi
         overall_status=1
+        sleep 3
         continue
     fi
 
     if ! python3 "$BASE_DIR/user_sync.py" >>"$LOG" 2>&1; then
         echo "[$token] Metadata sync failed — keeping existing catalog" >>"$LOG"
+        if [ ! -s "$catalog" ] && [ -f "${catalog}.bak" ] && [ -s "${catalog}.bak" ]; then
+            cp "${catalog}.bak" "$catalog"
+        fi
         overall_status=1
+        sleep 3
         continue
     fi
 
     echo "[$token] Done" >>"$LOG"
+    sleep 3
 done
 
 echo "=== User update finished: $(date), status=$overall_status ===" >>"$LOG"

@@ -41,7 +41,9 @@ def load_cache():
 
 
 def save_cache(cache):
-    CACHE_PATH.write_text(json.dumps(cache, ensure_ascii=False, indent=2))
+    tmp_path = CACHE_PATH.with_suffix(".tmp")
+    tmp_path.write_text(json.dumps(cache, ensure_ascii=False, indent=2))
+    os.replace(tmp_path, CACHE_PATH)
 
 
 def scrape_khdiamond_page(url: str, session: requests.Session) -> dict:
@@ -209,6 +211,21 @@ def main():
     items = json.loads(list_path.read_text())
     print(f"✓ Read {len(items)} items from list.json")
 
+    allow_shrink = os.environ.get("ALLOW_LARGE_SHRINK", "0").lower() in ("1", "true", "yes")
+
+    # Safety guard: refuse to overwrite an existing non-empty catalog with an empty list
+    if len(items) == 0:
+        if CATALOG_PATH.exists():
+            try:
+                prev = json.loads(CATALOG_PATH.read_text())
+                if isinstance(prev, list) and len(prev) > 0 and not allow_shrink:
+                    sys.exit(
+                        f"❌ Refusing to overwrite {CATALOG_PATH} with empty list when previous catalog has {len(prev)} items. "
+                        f"Set ALLOW_LARGE_SHRINK=1 to override."
+                    )
+            except Exception:
+                pass
+
     cache = load_cache()
     session = requests.Session()
     session.headers.update({"User-Agent": UA})
@@ -234,9 +251,13 @@ def main():
         # episode entries cached without posters; refresh those entries once.
         if cached and (kind != "episode" or cached.get("poster")):
             print(f"  [{i:>3}/{len(items)}] reused  {title[:60]}")
-            entry = cached
+            entry = dict(cached)
             entry["movie_id"] = movie_id
             entry["movie_id_4k"] = movie_id_4k
+            entry["series"] = series_slug or entry.get("series", "")
+            entry["season"] = item.get("season", entry.get("season", 1))
+            entry["episode"] = item.get("episode", entry.get("episode", 1))
+            entry["page_url"] = page_url or entry.get("page_url", "")
             catalog.append(entry)
             continue
 
@@ -296,14 +317,24 @@ def main():
             "tmdb_id":      tmdb_meta.get("tmdb_id", ""),
             "imdb_rating":  kh_meta.get("imdb_rating") or tmdb_meta.get("imdb_rating", ""),
             "runtime":      kh_meta.get("runtime") or tmdb_meta.get("runtime", ""),
+            "series":       series_slug,
+            "season":       item.get("season", 1),
+            "episode":      item.get("episode", 1),
+            "page_url":     page_url,
         }
 
         cache[cache_key] = entry
         catalog.append(entry)
 
+    if len(catalog) == 0 and len(items) > 0:
+        sys.exit(f"❌ Catalog sync produced 0 items from {len(items)} source items.")
+
     save_cache(cache)
 
-    CATALOG_PATH.write_text(json.dumps(catalog, ensure_ascii=False, indent=2))
+    tmp_cat = CATALOG_PATH.with_suffix(".tmp")
+    tmp_cat.write_text(json.dumps(catalog, ensure_ascii=False, indent=2))
+    os.replace(tmp_cat, CATALOG_PATH)
+
     print(f"\n✓ catalog.json written → {CATALOG_PATH}")
     print(f"   Total  : {len(catalog)}")
     print(f"   Movies : {sum(1 for e in catalog if e['type'] == 'movie')}")

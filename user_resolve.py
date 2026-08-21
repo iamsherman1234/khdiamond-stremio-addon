@@ -17,6 +17,7 @@ import requests
 from bs4 import BeautifulSoup
 from khdiamond_http import (extract_media_id, extract_nonce, extract_post_id,
                             response_embed_url)
+from khdiamond_credentials import load_credentials, login_with_saved_credentials
 
 COOKIES_PATH = Path(os.environ.get("COOKIES_PATH", "/root/khdiamond/cookies.txt"))
 USER_DIR     = Path(os.environ.get("USER_DIR", "/root/khdiamond"))
@@ -49,24 +50,56 @@ def make_session() -> requests.Session:
     return s
 
 
-def call_player_ajax(session, post_id, kind, referer, nume="1"):
+def renew_session_if_possible(session: requests.Session) -> bool:
+    if not load_credentials(USER_DIR):
+        return False
+    print("    (Attempting automatic session renewal via saved credentials...)")
+    ok, msg = login_with_saved_credentials(USER_DIR, COOKIES_PATH)
+    if ok:
+        jar = MozillaCookieJar(str(COOKIES_PATH))
+        jar.load(ignore_discard=True, ignore_expires=True)
+        session.cookies = jar
+        if hasattr(session, "_khdiamond_page_cache"):
+            session._khdiamond_page_cache.clear()
+        print("    (✓ Automatic session renewal succeeded)")
+        return True
+    print(f"    (Session renewal failed: {msg})")
+    return False
+
+
+def call_player_ajax(session, post_id, kind, referer, nume="1", allow_renew=True):
     out = {"status": "", "movie_id": "", "embed_url": ""}
     cache = getattr(session, "_khdiamond_page_cache", {})
     page_html = cache.get(referer, "")
     if not page_html:
-        try:
-            page = session.get(referer, timeout=20)
-            page.raise_for_status()
-            page_html = page.text
-            cache[referer] = page_html
-            session._khdiamond_page_cache = cache
-        except requests.RequestException as exc:
-            out["status"] = f"page_err:{type(exc).__name__}"
-            return out
+        for p_attempt in range(MAX_RETRIES + 1):
+            try:
+                page = session.get(referer, timeout=20)
+                if page.status_code == 429:
+                    wait = BACKOFF_BASE * (2 ** p_attempt) + random.uniform(0, 1)
+                    if p_attempt < MAX_RETRIES:
+                        print(f"      (Page 429 — sleeping {wait:.1f}s)")
+                        time.sleep(wait)
+                        continue
+                page.raise_for_status()
+                page_html = page.text
+                cache[referer] = page_html
+                session._khdiamond_page_cache = cache
+                break
+            except requests.RequestException as exc:
+                if p_attempt < MAX_RETRIES:
+                    time.sleep(RETRY_DELAY)
+                    continue
+                out["status"] = f"page_err:{type(exc).__name__}"
+                return out
+
     nonce = extract_nonce(page_html)
     if not nonce:
+        if allow_renew and renew_session_if_possible(session):
+            return call_player_ajax(session, post_id, kind, referer, nume=nume, allow_renew=False)
         out["status"] = "nonce_missing"
         return out
+
     payload = {
         "action": "doo_player_ajax",
         "post":   post_id,
@@ -80,9 +113,11 @@ def call_player_ajax(session, post_id, kind, referer, nume="1"):
         try:
             r = session.post(AJAX_URL, data=payload, headers=headers, timeout=20)
         except requests.Timeout:
-            out["status"] = "timeout"; return out
+            out["status"] = "timeout"
+            return out
         except Exception as e:
-            out["status"] = f"err:{type(e).__name__}"; return out
+            out["status"] = f"err:{type(e).__name__}"
+            return out
 
         if r.status_code == 429:
             ra = r.headers.get("Retry-After")
@@ -90,11 +125,20 @@ def call_player_ajax(session, post_id, kind, referer, nume="1"):
                 BACKOFF_BASE * (2 ** attempt) + random.uniform(0, 1))
             if attempt < MAX_RETRIES:
                 print(f"      (429 — sleeping {wait:.1f}s)")
-                time.sleep(wait); continue
-            out["status"] = "http_429_giveup"; return out
+                time.sleep(wait)
+                continue
+            out["status"] = "http_429_giveup"
+            return out
+
+        if r.status_code in (400, 401, 403):
+            if allow_renew and renew_session_if_possible(session):
+                return call_player_ajax(session, post_id, kind, referer, nume=nume, allow_renew=False)
+            out["status"] = f"http_{r.status_code}"
+            return out
 
         if r.status_code != 200:
-            out["status"] = f"http_{r.status_code}"; return out
+            out["status"] = f"http_{r.status_code}"
+            return out
 
         embed = response_embed_url(r)
         out["embed_url"] = embed
@@ -103,6 +147,8 @@ def call_player_ajax(session, post_id, kind, referer, nume="1"):
             out["movie_id"] = movie_id
             out["status"] = "ok"
         else:
+            if r.text.strip() == "0" and allow_renew and renew_session_if_possible(session):
+                return call_player_ajax(session, post_id, kind, referer, nume=nume, allow_renew=False)
             out["status"] = "player_rejected" if r.text.strip() == "0" else "no_id_in_embed"
         return out
 
@@ -112,13 +158,29 @@ def call_player_ajax(session, post_id, kind, referer, nume="1"):
 
 def fetch_episode_list(session, series_slug, series_title, series_url):
     print(f"  fetching series page → {series_url}")
-    r = session.get(series_url, timeout=30,
-                    headers={"Referer": "https://khdiamond.net/"})
-    if r.status_code != 200:
-        print(f"    HTTP {r.status_code} — skipping")
-        return []
+    for attempt in range(MAX_RETRIES + 1):
+        try:
+            r = session.get(series_url, timeout=30,
+                            headers={"Referer": "https://khdiamond.net/"})
+            if r.status_code == 429:
+                wait = BACKOFF_BASE * (2 ** attempt) + random.uniform(0, 1)
+                if attempt < MAX_RETRIES:
+                    print(f"    (Series 429 — sleeping {wait:.1f}s)")
+                    time.sleep(wait)
+                    continue
+            if r.status_code != 200:
+                print(f"    HTTP {r.status_code} — skipping")
+                return []
+            break
+        except Exception as e:
+            if attempt < MAX_RETRIES:
+                time.sleep(RETRY_DELAY)
+                continue
+            print(f"    Series fetch err {series_url}: {e}")
+            return []
+
     html = r.text
-    ep_urls = sorted(set(EP_LINK_RE.findall(html)))
+    ep_urls = list(dict.fromkeys(EP_LINK_RE.findall(html)))
     print(f"    found {len(ep_urls)} episodes")
     time.sleep(FETCH_DELAY)
 
@@ -137,25 +199,44 @@ def fetch_episode_list(session, series_slug, series_title, series_url):
         ep_meta[ep_href] = (season, episode, ep_title)
 
     episodes = []
-    for ep_url in ep_urls:
+    for i, ep_url in enumerate(ep_urls, 1):
         season, ep_num, ep_title = ep_meta.get(ep_url, ("", "", ""))
-        try:
-            er = session.get(ep_url, timeout=30,
-                             headers={"Referer": series_url})
-        except Exception as e:
-            print(f"    ep fetch err {ep_url}: {e}")
-            time.sleep(FETCH_DELAY); continue
-        if er.status_code != 200:
-            time.sleep(FETCH_DELAY); continue
+        if not ep_num:
+            ep_num = str(i)
+        if not season:
+            season = "1"
+        if not ep_title:
+            ep_title = f"ភាគទី {i}"
+
+        er = None
+        for attempt in range(MAX_RETRIES + 1):
+            try:
+                er = session.get(ep_url, timeout=30,
+                                 headers={"Referer": series_url})
+                if er.status_code == 429:
+                    wait = BACKOFF_BASE * (2 ** attempt) + random.uniform(0, 1)
+                    if attempt < MAX_RETRIES:
+                        time.sleep(wait)
+                        continue
+                break
+            except Exception as e:
+                if attempt < MAX_RETRIES:
+                    time.sleep(RETRY_DELAY)
+                    continue
+                print(f"    ep fetch err {ep_url}: {e}")
+                er = None
+
+        if not er or er.status_code != 200:
+            time.sleep(FETCH_DELAY)
+            continue
 
         m = POSTID_RE.search(er.text)
         if not m:
-            time.sleep(FETCH_DELAY); continue
+            time.sleep(FETCH_DELAY)
+            continue
         post_id = m.group(1)
 
-        se_tag = ""
-        if season and ep_num:
-            se_tag = f" — S{int(season):02d}E{int(ep_num):02d}"
+        se_tag = f" — S{int(season):02d}E{int(ep_num):02d}"
         full_title = f"{series_title}{se_tag}"
         if ep_title and ep_title != full_title:
             full_title = f"{full_title} — {ep_title}"
@@ -169,6 +250,8 @@ def fetch_episode_list(session, series_slug, series_title, series_url):
             "page_url":   ep_url,
             "article_id": f"p{post_id}",
             "series":     series_slug,
+            "season":     int(season),
+            "episode":    int(ep_num),
         })
         time.sleep(FETCH_DELAY)
 
@@ -260,28 +343,36 @@ def main():
         if out["status"] not in ("bad_article_id",):
             time.sleep(BASE_DELAY)
 
-    # Retry pass
-    failed_idx = [i for i, r in enumerate(results)
-                  if r["status"].startswith(("http_429", "err", "timeout"))]
+    # Retry pass for all failed items
+    failed_idx = [i for i, r in enumerate(results) if r["status"] != "ok"]
     if failed_idx:
         print(f"\n→ Retry pass for {len(failed_idx)} failed items...")
-        time.sleep(5)
+        renew_session_if_possible(session)
+        time.sleep(3)
         for i in failed_idx:
             row = worklist[i]
             art = str(row.get("article_id", "")).lstrip("p").strip()
             if not art.isdigit():
                 continue
             referer = row.get("page_url") or "https://khdiamond.net/"
+            kind = "tvshows" if row.get("kind") == "episode" else "movies"
             res = call_player_ajax(
                 session, art,
-                kind="tvshows" if row.get("kind") == "episode" else "movies",
+                kind=kind,
                 referer=referer,
+                allow_renew=True,
             )
             results[i].update(res)
-            mark = "✓" if res["status"] == "ok" else "✗"
-            print(f"  retry → {mark} {res['status']:17s} "
-                  f"{results[i].get('title','')[:55]:55s} "
-                  f"→ {res.get('movie_id', '')}")
+            if res["status"] == "ok" and kind == "movies" and row.get("page_url") and not results[i].get("movie_id_4k"):
+                if check_4k_option(session, row["page_url"]):
+                    res_4k = call_player_ajax(session, art, kind=kind, referer=referer, nume="2")
+                    if res_4k["status"] == "ok":
+                        results[i]["movie_id_4k"] = res_4k["movie_id"]
+            mark = "✓" if results[i]["status"] == "ok" else "✗"
+            k4 = f" 4K:{results[i]['movie_id_4k']}" if results[i].get("movie_id_4k") else ""
+            print(f"  retry → {mark} {results[i]['status']:17s} "
+                  f"{results[i].get('title','')[:50]:50s} "
+                  f"→ {results[i].get('movie_id', '')}{k4}")
             time.sleep(RETRY_DELAY)
 
     elapsed = time.time() - t0
@@ -292,15 +383,37 @@ def main():
     print(f"Resolved in {elapsed:.1f}s — {len(ok)}/{len(results)} ok, {has_4k} with 4K")
     print("═" * 60)
 
-    # Write list.json
+    out_path = USER_DIR / "list.json"
+    allow_shrink = os.environ.get("ALLOW_LARGE_SHRINK", "0").lower() in ("1", "true", "yes")
+
+    # Safety guards against wiping catalogs
+    if len(worklist) > 0 and len(ok) == 0:
+        sys.exit(f"❌ Refusing to overwrite {out_path}: 0 of {len(worklist)} items resolved. Preserving previous list.")
+
+    if len(worklist) > 0 and len(ok) < len(worklist) * 0.4 and not allow_shrink:
+        if out_path.exists():
+            try:
+                prev = json.loads(out_path.read_text())
+                if len(prev) > len(ok):
+                    sys.exit(
+                        f"❌ Refusing degraded list: only {len(ok)}/{len(worklist)} items resolved, "
+                        f"previous list had {len(prev)}. Preserving existing list. "
+                        f"Set ALLOW_LARGE_SHRINK=1 to override."
+                    )
+            except Exception:
+                pass
+
+    # Write list.json atomically
     list_data = [{"movie_id": r["movie_id"], "movie_id_4k": r.get("movie_id_4k", ""),
                   "title": r["title"], "kind": r["kind"],
                   "year": r.get("year", ""), "page_url": r.get("page_url", ""),
-                  "slug": r.get("slug", ""), "series": r.get("series", "")}
+                  "slug": r.get("slug", ""), "series": r.get("series", ""),
+                  "season": r.get("season", 1), "episode": r.get("episode", 1)}
                  for r in ok]
 
-    out_path = USER_DIR / "list.json"
-    out_path.write_text(json.dumps(list_data, ensure_ascii=False, indent=2))
+    tmp_path = out_path.with_suffix(".tmp")
+    tmp_path.write_text(json.dumps(list_data, ensure_ascii=False, indent=2))
+    os.replace(tmp_path, out_path)
     print(f"✓ Wrote {len(list_data)} rows to {out_path}")
 
     failed = [r for r in results if r["status"] != "ok"]

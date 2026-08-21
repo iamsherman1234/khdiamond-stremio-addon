@@ -170,6 +170,21 @@ def purchased_series_episodes(full_item: dict, personal: list) -> list:
             episodes.append(episode)
     return episodes
 
+def extract_ep_season_num(ep: dict) -> tuple[int, int]:
+    s = ep.get("season")
+    e = ep.get("episode")
+    if s is not None and e is not None and str(s).isdigit() and str(e).isdigit():
+        return int(s), int(e)
+    slug = str(ep.get("slug") or "")
+    m = re.search(r"(\d+)x(\d+)", slug)
+    if m:
+        return int(m.group(1)), int(m.group(2))
+    title = str(ep.get("title") or ep.get("title_khmer") or ep.get("title_english") or "")
+    m2 = re.search(r"S(\d+)\s*E(\d+)", title, re.IGNORECASE)
+    if m2:
+        return int(m2.group(1)), int(m2.group(2))
+    return int(s or 1), int(e or 1)
+
 def purchased_catalog_items(token: str, media_type: str, full_catalog: list, personal: list) -> list:
     if media_type == "movie":
         items = []
@@ -188,15 +203,74 @@ def purchased_catalog_items(token: str, media_type: str, full_catalog: list, per
         return items
 
     if media_type == "series":
+        personal_series = [item for item in personal if item.get("type") == "series"]
+        series_by_slug = {}
+        for ep in personal_series:
+            s_slug = ep.get("series") or (ep.get("slug", "").rsplit("-", 1)[0] if "-" in ep.get("slug", "") else ep.get("slug", ""))
+            series_by_slug.setdefault(s_slug, []).append(ep)
+
         items = []
-        for full_item in full_catalog:
-            if full_item.get("type") != "series":
-                continue
-            episodes = purchased_series_episodes(full_item, personal)
-            if episodes:
+        for s_slug, ep_list in series_by_slug.items():
+            full_item = next((item for item in full_catalog
+                              if item.get("type") == "series"
+                              and (item.get("slug") == s_slug or any(same_site_item(item, ep) for ep in ep_list))), None)
+            if full_item:
+                matched_eps = purchased_series_episodes(full_item, personal)
+                matched_keys = {(episode_number(ep.get("season")), episode_number(ep.get("episode"))) for ep in matched_eps}
+                episodes = list(matched_eps)
+                for ep in ep_list:
+                    s_num, ep_num = extract_ep_season_num(ep)
+                    if (s_num, ep_num) not in matched_keys:
+                        matched_keys.add((s_num, ep_num))
+                        episodes.append({
+                            "season": s_num,
+                            "episode": ep_num,
+                            "title": ep.get("title_english") or ep.get("title_khmer") or f"Episode {ep_num}",
+                            "page_url": ep.get("page_url", ""),
+                            "slug": ep.get("slug", ""),
+                            "thumbnail": ep.get("poster", ""),
+                        })
+                episodes.sort(key=lambda x: (episode_number(x.get("season")), episode_number(x.get("episode"))))
                 item = full_item.copy()
                 item["episodes"] = episodes
                 items.append(item)
+            else:
+                first_ep = ep_list[0]
+                series_title_khmer = first_ep.get("title_khmer", "")
+                series_title_khmer = re.sub(r"\s*[\u2013\u2014\-]\s*S\d+E\d+.*$", "", series_title_khmer).strip()
+                series_title_english = first_ep.get("title_english", "")
+                series_title_english = re.sub(r"\s*[\u2013\u2014\-]\s*S\d+E\d+.*$", "", series_title_english).strip()
+
+                episodes = []
+                for ep in sorted(ep_list, key=lambda x: extract_ep_season_num(x)):
+                    s_num, ep_num = extract_ep_season_num(ep)
+                    episodes.append({
+                        "season": s_num,
+                        "episode": ep_num,
+                        "title": ep.get("title_english") or ep.get("title_khmer") or f"Episode {ep_num}",
+                        "page_url": ep.get("page_url", ""),
+                        "slug": ep.get("slug", ""),
+                        "thumbnail": ep.get("poster", ""),
+                    })
+
+                fallback = {
+                    "type": "series",
+                    "slug": s_slug,
+                    "khd_id": f"khdcat_{s_slug}",
+                    "_fallback_id": normalize_imdb_id(first_ep.get("imdb_id")) or f"khd_{token}_{s_slug}",
+                    "imdb_id": first_ep.get("imdb_id", ""),
+                    "tmdb_id": first_ep.get("tmdb_id", ""),
+                    "title_khmer": series_title_khmer,
+                    "title_english": series_title_english or series_title_khmer,
+                    "year": first_ep.get("year", ""),
+                    "poster": first_ep.get("poster", ""),
+                    "backdrop": first_ep.get("backdrop", ""),
+                    "genres": first_ep.get("genres", []),
+                    "overview": first_ep.get("overview", ""),
+                    "imdb_rating": first_ep.get("imdb_rating", ""),
+                    "episodes": episodes,
+                }
+                items.append(fallback)
         return items
 
     return []
@@ -260,18 +334,26 @@ def find_purchased_item(personal: list, full_item: dict, requested_id: str):
     if full_item.get("type") == "series":
         if season is None or episode is None:
             return None
+        full_slug = full_item.get("slug", "")
         full_episode = next((ep for ep in full_item.get("episodes", []) or []
                              if episode_number(ep.get("season")) == season
                              and episode_number(ep.get("episode")) == episode), None)
-        if not full_episode:
-            return None
-        episode_slug = full_episode.get("page_url", "").rstrip("/").rsplit("/", 1)[-1]
-        episode_slug = full_episode.get("slug") or episode_slug
-        episode_url = normalized_page_url(full_episode.get("page_url"))
+        if full_episode:
+            episode_slug = full_episode.get("page_url", "").rstrip("/").rsplit("/", 1)[-1]
+            episode_slug = full_episode.get("slug") or episode_slug
+            episode_url = normalized_page_url(full_episode.get("page_url"))
+            matched = next((item for item in personal
+                            if item.get("type") == "series"
+                            and ((episode_slug and item.get("slug") == episode_slug)
+                                 or (episode_url and normalized_page_url(item.get("page_url")) == episode_url))), None)
+            if matched:
+                return matched
+
         return next((item for item in personal
                      if item.get("type") == "series"
-                     and ((episode_slug and item.get("slug") == episode_slug)
-                          or (episode_url and normalized_page_url(item.get("page_url")) == episode_url))), None)
+                     and episode_number(item.get("season")) == season
+                     and episode_number(item.get("episode")) == episode
+                     and (not full_slug or item.get("series") == full_slug or full_slug in str(item.get("slug", "")))), None)
 
     slug = full_item.get("slug") or ""
     page_url = normalized_page_url(full_item.get("page_url"))
@@ -611,7 +693,6 @@ async def refresh_upload(token: str, request: Request,
         if not validate_cookies(cookies_path):
             return HTMLResponse(page("Error", f"<h1>Invalid Cookies</h1><a href='/refresh/{token}'><button class='btn btn-secondary'>Try Again</button></a>"))
 
-    (d / "catalog.json").unlink(missing_ok=True)
     (d / "error.txt").unlink(missing_ok=True)
     (d / "expired.txt").unlink(missing_ok=True)
     threading.Thread(target=run_pipeline, args=(token,), daemon=True).start()
@@ -714,17 +795,23 @@ async def user_catalog_extra(token: str, type: str, id: str, extra: str):
 @app.get("/u/{token}/meta/{type}/{id}.json")
 async def user_meta(token: str, type: str, id: str):
     full_catalog = load_full_catalog()
+    personal = load_catalog(token)
+    purchased_items = purchased_catalog_items(token, type, full_catalog, personal)
+    item = next((m for m in purchased_items
+                 if m.get("type") == type and (item_matches_id(m, token, id) or m.get("_fallback_id") == id or public_item_id(m) == id)), None)
+    if item:
+        return JSONResponse({"meta": stremio_meta(item, include_videos=True)}, headers=CORS_HEADERS)
+
     item = find_full_item(full_catalog, type, id) if full_catalog else None
     if item:
         if type == "series":
-            purchased_episodes = purchased_series_episodes(item, load_catalog(token))
+            purchased_episodes = purchased_series_episodes(item, personal)
             if purchased_episodes:
                 item = item.copy()
                 item["episodes"] = purchased_episodes
         return JSONResponse({"meta": stremio_meta(item, include_videos=True)}, headers=CORS_HEADERS)
 
-    catalog = load_catalog(token)
-    item = next((m for m in catalog
+    item = next((m for m in personal
                  if m.get("type") == type and item_matches_id(m, token, id)), None)
     if not item:
         return JSONResponse({"meta": None}, headers=CORS_HEADERS)
@@ -754,11 +841,23 @@ async def user_stream(token: str, type: str, id: str):
                 if key not in seen_streams:
                     seen_streams.add(key)
                     streams.append(stream)
-        return JSONResponse({"streams": streams}, headers=CORS_HEADERS)
+        if streams:
+            return JSONResponse({"streams": streams}, headers=CORS_HEADERS)
+
+    base_id, season, episode = split_video_id(id)
+    if type == "series" and season is not None and episode is not None:
+        clean_slug = base_id.removeprefix("khdcat_").removeprefix(f"khd_{token}_")
+        item = next((m for m in personal
+                     if m.get("type") == "series"
+                     and episode_number(m.get("season")) == season
+                     and episode_number(m.get("episode")) == episode
+                     and (item_matches_id(m, token, base_id)
+                          or clean_slug in str(m.get("series", "") or m.get("slug", ""))
+                          or (m.get("imdb_id") and normalize_imdb_id(m.get("imdb_id")) == base_id))), None)
     else:
-        # Backward compatibility for manifests installed before v2.
         item = next((m for m in personal
                      if m.get("type") == type and item_matches_id(m, token, id)), None)
+
     if not item or not item.get("movie_id"):
         return JSONResponse({"streams": []}, headers=CORS_HEADERS)
     return JSONResponse({"streams": build_streams(item)}, headers=CORS_HEADERS)

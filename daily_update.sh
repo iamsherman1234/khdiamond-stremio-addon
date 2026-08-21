@@ -32,6 +32,8 @@ exec >> "$LOG" 2>&1
   public_status=$?
   echo "--- Public catalog finished with status $public_status ---"
 
+  sleep 5
+
   echo "--- Per-user catalog refresh ---"
   "$BASE_DIR/update_all_users.sh"
   users_status=$?

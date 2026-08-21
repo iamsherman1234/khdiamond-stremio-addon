@@ -85,7 +85,14 @@ def existing_catalog_count() -> int:
         return 0
     try:
         value = json.loads(OUTPUT_PATH.read_text())
-        return len(value) if isinstance(value, list) else 0
+        if isinstance(value, list):
+            unique_keys = {
+                (item.get("type"), item.get("slug"))
+                for item in value
+                if isinstance(item, dict) and item.get("slug")
+            }
+            return len(unique_keys)
+        return 0
     except Exception:
         return 0
 
@@ -151,60 +158,73 @@ def apply_manual_metadata(entry: dict) -> dict:
     return entry
 
 
-def scrape_listing_page(session: requests.Session, url: str) -> list[dict]:
-    """Scrape a single listing page. Returns list of basic movie dicts."""
-    try:
-        r = session.get(url, timeout=20)
-        if r.status_code == 404:
-            return None  # No more pages
-        if r.status_code != 200:
-            print(f"  HTTP {r.status_code} for {url}")
+def scrape_listing_page(session: requests.Session, url: str, max_retries: int = 3) -> list[dict] | None:
+    """Scrape a single listing page. Returns list of basic movie dicts, or None if end of listing."""
+    for attempt in range(max_retries + 1):
+        try:
+            r = session.get(url, timeout=25)
+            if r.status_code == 404:
+                return None  # No more pages
+            if r.status_code == 429:
+                wait = 5 * (attempt + 1)
+                print(f"  HTTP 429 for {url} — waiting {wait}s (attempt {attempt+1}/{max_retries})")
+                time.sleep(wait)
+                continue
+            if r.status_code != 200:
+                print(f"  HTTP {r.status_code} for {url} (attempt {attempt+1}/{max_retries})")
+                if attempt < max_retries:
+                    time.sleep(3)
+                    continue
+                return []
+
+            soup = BeautifulSoup(r.text, "html.parser")
+            articles = soup.find_all("article")
+            if not articles:
+                return None  # No more pages
+
+            items = []
+            for art in articles:
+                # Get page URL from h3 link
+                h3 = art.find("h3")
+                if not h3:
+                    continue
+                link = h3.find("a", href=True)
+                if not link:
+                    continue
+
+                page_url = link["href"]
+                title_khmer = link.get_text(strip=True)
+                slug = slug_from_url(page_url)
+
+                # Get real poster (2nd img tag)
+                imgs = art.select("div.poster img")
+                poster = ""
+                for img in imgs:
+                    src = img.get("data-src") or img.get("data-lazy-src") or img.get("src", "")
+                    if valid_poster_url(src):
+                        poster = src
+                        break
+
+                # Rating from listing
+                rating_div = art.select_one("div.rating")
+                rating = rating_div.get_text(strip=True) if rating_div else ""
+
+                items.append({
+                    "slug":        slug,
+                    "title_khmer": title_khmer,
+                    "page_url":    page_url,
+                    "poster":      poster,
+                    "rating":      rating,
+                })
+
+            return items
+        except Exception as e:
+            print(f"  Fetch error {url} (attempt {attempt+1}/{max_retries}): {e}")
+            if attempt < max_retries:
+                time.sleep(3)
+                continue
             return []
-    except Exception as e:
-        print(f"  Fetch error {url}: {e}")
-        return []
-
-    soup = BeautifulSoup(r.text, "html.parser")
-    articles = soup.find_all("article")
-    if not articles:
-        return None  # No more pages
-
-    items = []
-    for art in articles:
-        # Get page URL from h3 link
-        h3 = art.find("h3")
-        if not h3:
-            continue
-        link = h3.find("a", href=True)
-        if not link:
-            continue
-
-        page_url = link["href"]
-        title_khmer = link.get_text(strip=True)
-        slug = slug_from_url(page_url)
-
-        # Get real poster (2nd img tag)
-        imgs = art.select("div.poster img")
-        poster = ""
-        for img in imgs:
-            src = img.get("data-src") or img.get("data-lazy-src") or img.get("src", "")
-            if valid_poster_url(src):
-                poster = src
-                break
-
-        # Rating from listing
-        rating_div = art.select_one("div.rating")
-        rating = rating_div.get_text(strip=True) if rating_div else ""
-
-        items.append({
-            "slug":        slug,
-            "title_khmer": title_khmer,
-            "page_url":    page_url,
-            "poster":      poster,
-            "rating":      rating,
-        })
-
-    return items
+    return []
 
 
 def text_tokens(value: str) -> set[str]:
@@ -730,8 +750,18 @@ def main():
             page += 1
             time.sleep(PAGE_DELAY)
 
+    # Deduplicate all_items by (stype, slug)
+    unique_items = []
+    seen_keys = set()
+    for item, stype, media_type in all_items:
+        key = (stype, item.get("slug"))
+        if key not in seen_keys:
+            seen_keys.add(key)
+            unique_items.append((item, stype, media_type))
+    all_items = unique_items
+
     print(f"\n{'='*60}")
-    print(f"Total scraped: {len(all_items)} items")
+    print(f"Total scraped (unique): {len(all_items)} items")
     if (not ALLOW_LARGE_SHRINK
             and not catalog_size_is_safe(len(all_items), previous_count)):
         raise RuntimeError(
