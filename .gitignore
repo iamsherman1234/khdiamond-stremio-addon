@@ -52,3 +52,13 @@ full_catalog_cache.json
 __pycache__/
 node_modules/
 scripts/rename_gdrive.py
+
+# Security & Secrets
+.env.*
+!.env.example
+*.key
+*.pem
+*_session.json
+*.session
+.mkvbase_profile/
+.mkvbase_profile_*
