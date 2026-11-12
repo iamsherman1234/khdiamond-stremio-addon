@@ -1,3 +1,33 @@
+# Node
 node_modules/
+npm-debug.log
+
+# Environment & Secrets
 .env
+.env.*
+!.env.example
+*.key
+*.pem
+*.session
+*_session.json
+service_account.json
+credential.key
+cookies.txt
+
+# Logs & Run-time data
 *.log
+*.pid
+.pm2/
+
+# Catalog artifacts & Caches
+users/
+catalog.json*
+meta_cache.json
+__pycache__/
+*.pyc
+
+# OS & Backups
+.DS_Store
+Thumbs.db
+*.bak
+*.backup
