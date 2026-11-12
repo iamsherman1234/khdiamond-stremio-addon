@@ -15,6 +15,14 @@ module.exports = {
   catalogs: [
     {
       type: "movie",
+      id: "khd_unlocked",
+      name: "KHDiamond Unlocked Library (រឿងដែលបានទិញ)",
+      extra: [
+        { name: "skip", isRequired: false }
+      ]
+    },
+    {
+      type: "movie",
       id: "khd_movies",
       name: "KHDiamond Movies (រឿងដុំ)",
       extra: [

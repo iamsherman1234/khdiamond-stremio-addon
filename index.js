@@ -126,7 +126,7 @@ app.get("/catalog/:type/:id/:extra?.json", async (req, res) => {
   console.log(`[Addon] Catalog request: type=${type}, id=${id}, extra=`, extra);
 
   try {
-    const metas = await scraper.getCatalog(type, {
+    const metas = await scraper.getCatalog(type, id, {
       search: extra.search,
       skip: parseInt(extra.skip || "0", 10),
     });
