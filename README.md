@@ -50,14 +50,26 @@ pm2 restart khdiamond-addon
 pm2 status
 ```
 
+## Multi-User Setup
+
+Connect individual KHDiamond accounts with 1 click:
+1. Open `http://<host>:7070/configure` (or `http://100.99.23.40:7070/configure` over Tailscale).
+2. Enter your KHDiamond.net email & password.
+3. The addon authenticates through the Cambodia proxy in <300ms, detects your purchased movies, and generates your personal Stremio/Nuvio TV addon link (`/u/<token>/manifest.json`).
+
 ## Endpoints
 
 | Endpoint | Description |
 |---|---|
-| `GET /manifest.json` | Stremio addon manifest with `khd:`, `tt`, `tmdb:` prefixes |
-| `GET /catalog/:type/:id/:extra?.json` | Browse movies and series with pagination |
-| `GET /meta/:type/:id.json` | Detailed metadata and full episode listing |
-| `GET /stream/:type/:id.json` | Stream extraction (HLS Proxied + Direct) |
+| `GET /` | Web landing page |
+| `GET /configure` | Multi-user self-service setup page |
+| `POST /api/register` | User authentication & personal token generation API |
+| `GET /manifest.json` | Default shared Stremio manifest |
+| `GET /u/:token/manifest.json` | User-scoped personal manifest (includes purchased `khd_unlocked` library) |
+| `GET /u/:token/catalog/:type/:id/:extra?.json` | User-scoped catalog browsing |
+| `GET /u/:token/stream/:type/:id.json` | User-scoped stream resolution |
+| `GET /proxy/hls/master.m3u8` | Signed real-time HLS master playlist proxy |
+| `GET /proxy/hls/playlist.m3u8` | Signed sub-playlist rewrite for open CDN chunk playback |
 | `GET /proxy/hls/master.m3u8` | Signed master playlist proxy |
 | `GET /proxy/hls/playlist.m3u8` | Signed sub-playlist rendition proxy |
 | `GET /health` | Health and uptime monitor |

@@ -97,6 +97,32 @@ async function runTest() {
       }
     }
 
+    // ── STEP 7: MULTI-USER SYSTEM ──
+    console.log("\n[7/7] Testing Multi-User Manager & User-Scoped Addon...");
+    const { UserManager } = require("./lib/userManager");
+    const userManager = new UserManager({ defaultClient: httpClient, hlsProxy });
+    hlsProxy.setUserManager(userManager);
+
+    const testUser = process.env.KHDIAMOND_USER || "chumlayan95@gmail.com";
+    const testPass = process.env.KHDIAMOND_PASS || "240995L@yan";
+
+    const regResult = await userManager.registerUser(testUser, testPass);
+    console.log("Registered user:", {
+      token: regResult.token,
+      username: regResult.username,
+      unlockedCount: regResult.unlockedCount
+    });
+
+    const userScraper = userManager.getScraper(regResult.token);
+    const userUnlocked = await userScraper.getCatalog("movie", "khd_unlocked");
+    console.log(`User unlocked catalog returned ${userUnlocked.length} titles.`);
+
+    const userKgfStreams = await userScraper.getStreams("movie", kgfId, testHostBase);
+    console.log(`User-scoped streams returned ${userKgfStreams.length} stream(s).`);
+    if (userKgfStreams[0] && userKgfStreams[0].url.includes(`u=${regResult.token}`)) {
+      console.log(">>> User token correctly signed and present in stream URL!");
+    }
+
     console.log("\n=== ALL TESTS PASSED SUCCESSFULLY! ===");
   } catch (err) {
     console.error("\n[!] Test failed with error:", err);

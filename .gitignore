@@ -20,6 +20,7 @@ cookies.txt
 .pm2/
 
 # Catalog artifacts & Caches
+data/
 users/
 catalog.json*
 meta_cache.json
