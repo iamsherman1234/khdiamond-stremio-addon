@@ -364,7 +364,7 @@ app.get(["/u/:token/catalog.json", "/u/:token/list.json"], async (req, res) => {
   try {
     const userScraper = userManager.getScraper(token);
     const includeSeriesEpisodes = req.query.episodes !== "false";
-    const includeFree = req.query.free === "true";
+    const includeFree = req.query.free !== "false";
     const catalog = await userScraper.getSyncCatalog(hostBase, { includeSeriesEpisodes, includeFree });
     res.setHeader("Cache-Control", "max-age=600, public");
     res.setHeader("Content-Type", "application/json; charset=utf-8");
@@ -460,13 +460,26 @@ app.get(["/catalog.json", "/list.json"], async (req, res) => {
   try {
     const userScraper = userManager.getScraper(defaultToken);
     const includeSeriesEpisodes = req.query.episodes !== "false";
-    const includeFree = req.query.free === "true";
+    const includeFree = req.query.free !== "false";
     const catalog = await userScraper.getSyncCatalog(hostBase, { includeSeriesEpisodes, includeFree });
     res.setHeader("Cache-Control", "max-age=600, public");
     res.setHeader("Content-Type", "application/json; charset=utf-8");
     res.json(catalog);
   } catch (err) {
     console.error("[Addon] Global sync catalog error:", err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// 2.6 KhBoxMax Free Movies Dedicated Catalog
+app.get(["/khboxmax/catalog.json", "/free/catalog.json"], async (req, res) => {
+  try {
+    const freeItems = await defaultScraper.fetchKhboxmaxFreeMovies();
+    res.setHeader("Cache-Control", "max-age=1800, public");
+    res.setHeader("Content-Type", "application/json; charset=utf-8");
+    res.json(freeItems);
+  } catch (err) {
+    console.error("[Addon] KhBoxMax free catalog error:", err.message);
     res.status(500).json({ error: err.message });
   }
 });

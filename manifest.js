@@ -11,8 +11,17 @@ module.exports = {
   background: "https://khdiamond.net/wp-content/uploads/2025/02/khdiamond-logo.png",
   resources: ["catalog", "meta", "stream"],
   types: ["movie", "series"],
-  idPrefixes: ["khd:", "tt", "tmdb:"],
+  idPrefixes: ["khd:", "khbox:", "tt", "tmdb:"],
   catalogs: [
+    {
+      type: "movie",
+      id: "khboxmax_free",
+      name: "KhBoxMax Free Movies (ឥតគិតថ្លៃ)",
+      extra: [
+        { name: "search", isRequired: false },
+        { name: "skip", isRequired: false }
+      ]
+    },
     {
       type: "movie",
       id: "khd_unlocked",
