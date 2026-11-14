@@ -351,6 +351,28 @@ app.get("/u/:token/catalog/:type/:id/:extra?.json", async (req, res) => {
   }
 });
 
+// 2.5 User Sync / Automation Catalog (flat array for Colab / aria2 / Google Drive sync)
+app.get(["/u/:token/catalog.json", "/u/:token/list.json"], async (req, res) => {
+  const { token } = req.params;
+  const user = userManager.getUser(token);
+  if (!user) {
+    return res.status(404).json({ error: "User token not found" });
+  }
+
+  const hostBase = getHostBase(req);
+
+  try {
+    const userScraper = userManager.getScraper(token);
+    const catalog = await userScraper.getSyncCatalog(hostBase);
+    res.setHeader("Cache-Control", "max-age=600, public");
+    res.setHeader("Content-Type", "application/json; charset=utf-8");
+    res.json(catalog);
+  } catch (err) {
+    console.error(`[UserAddon:${token}] Sync catalog error:`, err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
 // 3. User Meta
 app.get("/u/:token/meta/:type/:id.json", async (req, res) => {
   const { token, type, id } = req.params;
@@ -422,6 +444,26 @@ app.get("/catalog/:type/:id/:extra?.json", async (req, res) => {
   } catch (err) {
     console.error("[Addon] Catalog error:", err.message);
     res.json({ metas: [] });
+  }
+});
+
+// 2.5 Global Sync / Automation Catalog fallback
+app.get(["/catalog.json", "/list.json"], async (req, res) => {
+  const users = userManager.listUsers();
+  if (users.length === 0) {
+    return res.status(404).json({ error: "No users registered" });
+  }
+  const defaultToken = users[0].token;
+  const hostBase = getHostBase(req);
+  try {
+    const userScraper = userManager.getScraper(defaultToken);
+    const catalog = await userScraper.getSyncCatalog(hostBase);
+    res.setHeader("Cache-Control", "max-age=600, public");
+    res.setHeader("Content-Type", "application/json; charset=utf-8");
+    res.json(catalog);
+  } catch (err) {
+    console.error("[Addon] Global sync catalog error:", err.message);
+    res.status(500).json({ error: err.message });
   }
 });
 
