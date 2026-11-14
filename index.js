@@ -363,7 +363,9 @@ app.get(["/u/:token/catalog.json", "/u/:token/list.json"], async (req, res) => {
 
   try {
     const userScraper = userManager.getScraper(token);
-    const catalog = await userScraper.getSyncCatalog(hostBase);
+    const includeSeriesEpisodes = req.query.episodes !== "false";
+    const includeFree = req.query.free === "true";
+    const catalog = await userScraper.getSyncCatalog(hostBase, { includeSeriesEpisodes, includeFree });
     res.setHeader("Cache-Control", "max-age=600, public");
     res.setHeader("Content-Type", "application/json; charset=utf-8");
     res.json(catalog);
@@ -457,7 +459,9 @@ app.get(["/catalog.json", "/list.json"], async (req, res) => {
   const hostBase = getHostBase(req);
   try {
     const userScraper = userManager.getScraper(defaultToken);
-    const catalog = await userScraper.getSyncCatalog(hostBase);
+    const includeSeriesEpisodes = req.query.episodes !== "false";
+    const includeFree = req.query.free === "true";
+    const catalog = await userScraper.getSyncCatalog(hostBase, { includeSeriesEpisodes, includeFree });
     res.setHeader("Cache-Control", "max-age=600, public");
     res.setHeader("Content-Type", "application/json; charset=utf-8");
     res.json(catalog);
