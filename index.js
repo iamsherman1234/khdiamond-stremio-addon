@@ -8,6 +8,7 @@ const { HttpClient } = require("./lib/client");
 const { HlsProxy } = require("./lib/hlsProxy");
 const { KhdiamondScraper } = require("./lib/scraper");
 const { UserManager } = require("./lib/userManager");
+const { streamGDriveProxy } = require("./lib/gdrive");
 
 const app = express();
 const PORT = parseInt(process.env.PORT || "7070", 10);
@@ -526,6 +527,11 @@ app.get("/proxy/hls/master.m3u8", async (req, res) => {
 app.get("/proxy/hls/playlist.m3u8", async (req, res) => {
   const hostBase = getHostBase(req);
   await hlsProxy.handleSubPlaylist(req, res, hostBase);
+});
+
+// Google Drive Streaming Proxy Route
+app.get("/gdrive/file/:fileId/:filename", (req, res) => {
+  streamGDriveProxy(req.params.fileId, req, res, process.env.GDRIVE_API_KEY || "");
 });
 
 app.listen(PORT, () => {
