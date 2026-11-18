@@ -68,9 +68,10 @@ async function runTest() {
     console.log(`Found ${kgfStreams.length} stream(s) for KGF:`);
     console.log(JSON.stringify(kgfStreams, null, 2));
 
-    if (kgfStreams.length > 0 && kgfStreams[0].url) {
+    const hlsStream = kgfStreams.find((s) => s.type === "hls" || (s.url && s.url.includes("/proxy/hls/")));
+    if (hlsStream && hlsStream.url) {
       console.log("\n[6/6] Verifying HLS Stream Proxy Playability...");
-      const proxyUrl = kgfStreams[0].url;
+      const proxyUrl = hlsStream.url;
       const proxyQuery = proxyUrl.replace(testHostBase, "");
       console.log(`Testing master playlist route: ${proxyQuery}`);
 
@@ -84,7 +85,12 @@ async function runTest() {
       const mockRes = {
         setHeader: (k, v) => { responseHeaders[k] = v; },
         status: (code) => { responseStatus = code; return mockRes; },
-        send: (body) => { responseBody = body; }
+        send: (body) => { responseBody = body; },
+        redirect: (url) => {
+          responseStatus = 302;
+          responseHeaders["Location"] = url;
+          responseBody = `#EXTM3U\n#REDIRECT: ${url}`;
+        }
       };
 
       await hlsProxy.handleMasterPlaylist(mockReq, mockRes, testHostBase);
@@ -119,7 +125,8 @@ async function runTest() {
 
     const userKgfStreams = await userScraper.getStreams("movie", kgfId, testHostBase);
     console.log(`User-scoped streams returned ${userKgfStreams.length} stream(s).`);
-    if (userKgfStreams[0] && userKgfStreams[0].url.includes(`u=${regResult.token}`)) {
+    const userHlsStream = userKgfStreams.find((s) => s.type === "hls" || (s.url && s.url.includes("/proxy/hls/")));
+    if (userHlsStream && userHlsStream.url.includes(`u=${regResult.token}`)) {
       console.log(">>> User token correctly signed and present in stream URL!");
     }
 
